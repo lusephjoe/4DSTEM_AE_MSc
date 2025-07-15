@@ -5,7 +5,7 @@ setup(
     version="0.1.0",
     packages=find_packages(),
     install_requires=[
-        "pytorch", #your version will vary by device
+        # "pytorch", your version will vary by device
         "h5py~=3.12",
         "numpy~=1.26",
         "tqdm~=4.66",
