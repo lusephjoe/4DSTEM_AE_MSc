@@ -1,3 +1,8 @@
 outputs/
 .python-version
 data/
+CLAUDE.md
+4dstem_ae.egg-info
+.pytest_cache
+scripts/__pycache__
+.DS_Store
