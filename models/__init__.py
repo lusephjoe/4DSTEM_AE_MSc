@@ -1,4 +1,4 @@
-from .autoencoder import AutoEncoder
+from .autoencoder import Autoencoder
 from .blocks import *
 
-__all__ = ["AutoEncoder"]
+__all__ = ["Autoencoder"]
