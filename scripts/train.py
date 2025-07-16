@@ -101,6 +101,7 @@ def main():
     if args.device == "auto":
         if torch.cuda.is_available():
             args.device = "cuda"
+            torch.set_float32_matmul_precision('medium')
         elif torch.backends.mps.is_available():
             args.device = "mps"
         else:
