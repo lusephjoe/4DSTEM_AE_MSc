@@ -19,6 +19,7 @@ from matplotlib.patches import Rectangle
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import hyperspy.api as hs
 from matplotlib.widgets import RectangleSelector
+from scipy.ndimage import gaussian_filter
 
 
 class STEMVisualizer:
@@ -38,6 +39,9 @@ class STEMVisualizer:
         self.scan_shape = scan_shape or self._infer_scan_shape()
         self.pattern_shape = self.data.shape[-2:]
         self.center = (self.pattern_shape[0] // 2, self.pattern_shape[1] // 2)
+        
+        # Find direct beam position
+        self.direct_beam_position = self._find_direct_beam_position()
         
         # Default field regions
         self.bright_field_region = self._default_bright_field_region()
@@ -75,19 +79,42 @@ class STEMVisualizer:
         # Choose the most square-like factor pair
         return min(factors, key=lambda x: abs(x[0] - x[1]))
     
+    def _find_direct_beam_position(self) -> Tuple[int, int]:
+        """Find the direct beam position (brightest spot) following py4DSTEM approach."""
+        # Calculate mean diffraction pattern for beam position detection
+        mean_dp = np.mean(self.data, axis=0)
+        
+        # Apply gaussian filter and find brightest spot
+        r = min(self.pattern_shape) // 20  # Filter radius
+        filtered_dp = gaussian_filter(mean_dp, r)
+        center_y, center_x = np.unravel_index(np.argmax(filtered_dp), filtered_dp.shape)
+        
+        # Refine position using center of mass in circular region
+        y_indices, x_indices = np.indices(mean_dp.shape)
+        mask = np.hypot(x_indices - center_x, y_indices - center_y) < r * 1.5
+        
+        # Center of mass calculation
+        total_intensity = np.sum(mean_dp * mask)
+        if total_intensity > 0:
+            x_com = np.sum(x_indices * mean_dp * mask) / total_intensity
+            y_com = np.sum(y_indices * mean_dp * mask) / total_intensity
+            return int(y_com), int(x_com)
+        else:
+            return center_y, center_x
+    
     def _default_bright_field_region(self) -> Tuple[int, int, int, int]:
-        """Default bright field region (central) - more conservative size."""
-        center_h, center_w = self.center
-        region_size = min(self.pattern_shape) // 16  # Smaller region like m3_learning examples
-        return (center_h - region_size, center_h + region_size,
-                center_w - region_size, center_w + region_size)
+        """Default bright field region centered on direct beam."""
+        center_y, center_x = self.direct_beam_position
+        region_size = min(self.pattern_shape) // 16  # Conservative size
+        return (center_y - region_size, center_y + region_size,
+                center_x - region_size, center_x + region_size)
     
     def _default_dark_field_region(self) -> Tuple[int, int, int, int]:
-        """Default dark field region (annular) - more conservative size."""
-        center_h, center_w = self.center
-        outer_radius = min(self.pattern_shape) // 6  # Smaller region like m3_learning examples
-        return (center_h - outer_radius, center_h + outer_radius,
-                center_w - outer_radius, center_w + outer_radius)
+        """Default dark field region (annular) centered on direct beam."""
+        center_y, center_x = self.direct_beam_position
+        outer_radius = min(self.pattern_shape) // 6  # Conservative size
+        return (center_y - outer_radius, center_y + outer_radius,
+                center_x - outer_radius, center_x + outer_radius)
     
     def set_bright_field_region(self, region: Tuple[int, int, int, int]):
         """Set bright field region (y_min, y_max, x_min, x_max)."""
@@ -97,27 +124,21 @@ class STEMVisualizer:
         """Set dark field region (y_min, y_max, x_min, x_max)."""
         self.dark_field_region = region
     
-    def create_virtual_field_image(self, field_region: Tuple[int, int, int, int], 
-                                  field_type: str = 'bright') -> np.ndarray:
+    def create_virtual_field_image(self, field_region: Tuple[int, int, int, int]) -> np.ndarray:
         """
-        Create virtual bright/dark field image following m3_learning implementation.
+        Create virtual field image by integrating over specified region.
         
         Args:
             field_region: Region for integration (y_min, y_max, x_min, x_max)
-            field_type: 'bright' or 'dark' field
         
         Returns:
             Virtual field image (scan_y, scan_x)
         """
         y_min, y_max, x_min, x_max = field_region
         
-        # Extract the field region from raw data (not log data)
-        # Following m3_learning: data.data.reshape(-1, shape_[2], shape_[3])[:, y_min:y_max, x_min:x_max]
+        # Extract the field region from raw data and sum intensities
         field_data = self.data[:, y_min:y_max, x_min:x_max]
-        
-        # Calculate mean intensity in the region for each scan position
-        # Following m3_learning: np.mean(field_data.reshape(shape_[0]*shape_[1], -1), axis=1)
-        virtual_image = np.mean(field_data.reshape(self.data.shape[0], -1), axis=1)
+        virtual_image = np.sum(field_data.reshape(self.data.shape[0], -1), axis=1)
         
         # Reshape to scan dimensions
         virtual_image = virtual_image.reshape(self.scan_shape)
@@ -170,8 +191,7 @@ class STEMVisualizer:
         if ax is None:
             fig, ax = plt.subplots(figsize=(8, 8))
         
-        # Use log data for visualization following m3_learning
-        # Following m3_learning: np.mean(data.log_data.reshape(-1, shape_[2], shape_[3]), axis=0)
+        # Use log data for visualization
         if use_log and hasattr(self, 'log_data'):
             mean_pattern = np.mean(self.log_data, axis=0)
         else:
@@ -182,6 +202,11 @@ class STEMVisualizer:
         ax.axis('off')
         
         if show_regions:
+            # Mark direct beam position
+            y_beam, x_beam = self.direct_beam_position
+            ax.plot(x_beam, y_beam, 'w+', markersize=15, markeredgewidth=3)
+            ax.plot(x_beam, y_beam, 'k+', markersize=12, markeredgewidth=2)
+            
             # Bright field region
             y_min, y_max, x_min, x_max = self.bright_field_region
             rect = Rectangle((x_min, y_min), x_max-x_min, y_max-y_min, 
@@ -210,7 +235,7 @@ class STEMVisualizer:
         axes[0].set_title('Mean Diffraction Pattern (Log)')
         
         # Bright field image
-        bf_image = self.create_virtual_field_image(self.bright_field_region, 'bright')
+        bf_image = self.create_virtual_field_image(self.bright_field_region)
         im1 = axes[1].imshow(bf_image, cmap='gray')
         axes[1].set_title('Virtual Bright Field')
         axes[1].axis('off')
@@ -219,7 +244,7 @@ class STEMVisualizer:
         plt.colorbar(im1, cax=cax)
         
         # Dark field image
-        df_image = self.create_virtual_field_image(self.dark_field_region, 'dark')
+        df_image = self.create_virtual_field_image(self.dark_field_region)
         im2 = axes[2].imshow(df_image, cmap='hot')
         axes[2].set_title('Virtual Dark Field')
         axes[2].axis('off')
@@ -290,7 +315,7 @@ class STEMVisualizer:
         ax_idx += 1
         
         # Bright field
-        bf_image = self.create_virtual_field_image(self.bright_field_region, 'bright')
+        bf_image = self.create_virtual_field_image(self.bright_field_region)
         im = axes[ax_idx // cols, ax_idx % cols].imshow(bf_image, cmap='gray')
         axes[ax_idx // cols, ax_idx % cols].set_title('Virtual Bright Field')
         axes[ax_idx // cols, ax_idx % cols].axis('off')
@@ -300,7 +325,7 @@ class STEMVisualizer:
         ax_idx += 1
         
         # Dark field
-        df_image = self.create_virtual_field_image(self.dark_field_region, 'dark')
+        df_image = self.create_virtual_field_image(self.dark_field_region)
         im = axes[ax_idx // cols, ax_idx % cols].imshow(df_image, cmap='hot')
         axes[ax_idx // cols, ax_idx % cols].set_title('Virtual Dark Field')
         axes[ax_idx // cols, ax_idx % cols].axis('off')
@@ -321,14 +346,14 @@ class STEMVisualizer:
             ax_idx += 1
             
             # Reconstructed bright field
-            comp_bf = comp_viz.create_virtual_field_image(self.bright_field_region, 'bright')
+            comp_bf = comp_viz.create_virtual_field_image(self.bright_field_region)
             axes[ax_idx // cols, ax_idx % cols].imshow(comp_bf, cmap='gray')
             axes[ax_idx // cols, ax_idx % cols].set_title('Reconstructed Bright Field')
             axes[ax_idx // cols, ax_idx % cols].axis('off')
             ax_idx += 1
             
             # Reconstructed dark field
-            comp_df = comp_viz.create_virtual_field_image(self.dark_field_region, 'dark')
+            comp_df = comp_viz.create_virtual_field_image(self.dark_field_region)
             axes[ax_idx // cols, ax_idx % cols].imshow(comp_df, cmap='hot')
             axes[ax_idx // cols, ax_idx % cols].set_title('Reconstructed Dark Field')
             axes[ax_idx // cols, ax_idx % cols].axis('off')
@@ -442,10 +467,7 @@ def main():
             raise ValueError(f"Unsupported comparison file format: {comp_path.suffix}")
         print(f"Loaded comparison data with shape: {comparison_data.shape}")
     
-    # Generate and save complete visualization (all panels)
-    visualizer.save_complete_visualization(args.output, comparison_data)
-    
-    # Create 3-panel layout with scalebars
+    # Create main 3-panel visualization with scalebars
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
     
     # Mean diffraction pattern (log scale) with scalebar
@@ -453,56 +475,29 @@ def main():
     axes[0].set_title('Mean Diffraction Pattern (Log)')
     
     # Bright field image with scalebar
-    bf_image = visualizer.create_virtual_field_image(visualizer.bright_field_region, 'bright')
+    bf_image = visualizer.create_virtual_field_image(visualizer.bright_field_region)
     axes[1].imshow(bf_image, cmap='gray')
     axes[1].set_title('Virtual Bright Field')
     axes[1].axis('off')
     visualizer._add_scalebar(axes[1], pattern_scale=False)
     
     # Dark field image with scalebar
-    df_image = visualizer.create_virtual_field_image(visualizer.dark_field_region, 'dark')
+    df_image = visualizer.create_virtual_field_image(visualizer.dark_field_region)
     axes[2].imshow(df_image, cmap='hot')
     axes[2].set_title('Virtual Dark Field')
     axes[2].axis('off')
     visualizer._add_scalebar(axes[2], pattern_scale=False)
     
     plt.tight_layout()
-    panel_output = args.output.replace('.png', '_3panel.png')
-    fig.savefig(panel_output, dpi=300, bbox_inches='tight')
+    fig.savefig(args.output, dpi=300, bbox_inches='tight')
     plt.close()
     
-    print(f"3-panel visualization saved to: {panel_output}")
+    print(f"STEM visualization saved to: {args.output}")
     
-    # Create separate individual images for each component
-    base_name = args.output.replace('.png', '')
-    
-    # Mean diffraction pattern
-    fig, ax = plt.subplots(figsize=(8, 8))
-    visualizer.plot_mean_diffraction_pattern(ax, use_log=True, add_scalebar=True)
-    fig.savefig(f"{base_name}_mean_diffraction.png", dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    # Bright field
-    fig, ax = plt.subplots(figsize=(8, 8))
-    bf_image = visualizer.create_virtual_field_image(visualizer.bright_field_region, 'bright')
-    ax.imshow(bf_image, cmap='gray')
-    ax.set_title('Virtual Bright Field')
-    ax.axis('off')
-    visualizer._add_scalebar(ax, pattern_scale=False)
-    fig.savefig(f"{base_name}_bright_field.png", dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    # Dark field
-    fig, ax = plt.subplots(figsize=(8, 8))
-    df_image = visualizer.create_virtual_field_image(visualizer.dark_field_region, 'dark')
-    ax.imshow(df_image, cmap='hot')
-    ax.set_title('Virtual Dark Field')
-    ax.axis('off')
-    visualizer._add_scalebar(ax, pattern_scale=False)
-    fig.savefig(f"{base_name}_dark_field.png", dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    print(f"Individual images saved: {base_name}_mean_diffraction.png, {base_name}_bright_field.png, {base_name}_dark_field.png")
+    # If comparison data provided, create comparison visualization
+    if comparison_data is not None:
+        visualizer.save_complete_visualization(args.output.replace('.png', '_comparison.png'), comparison_data)
+        print(f"Comparison visualization saved to: {args.output.replace('.png', '_comparison.png')}")
 
 
 if __name__ == "__main__":
