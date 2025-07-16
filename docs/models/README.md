@@ -4,7 +4,7 @@ This document provides detailed technical documentation for the neural network a
 
 ## 🏗️ Architecture Overview
 
-The autoencoder uses a ResNet-based architecture with adaptive components designed for **image-size agnostic processing**. The model maintains a consistent parameter count of **3,914,404 parameters** across all input sizes.
+The autoencoder uses a ResNet-based architecture with adaptive components designed for **image-size agnostic processing**.
 
 ## 📁 Model Files
 
@@ -31,7 +31,6 @@ Input (1, H, W)
 **Key Features**:
 - **Adaptive pooling**: Handles any input size from 32×32 to 512×512+
 - **Conditional batch normalization**: Only applied when spatial dimensions > 1×1
-- **Fixed output size**: Always produces 32D latent vectors
 
 #### `Decoder` Class
 **Purpose**: Reconstructs diffraction patterns from 32D latent vectors

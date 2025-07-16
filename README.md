@@ -7,7 +7,7 @@ A ResNet-based convolutional autoencoder for dimensionality reduction and analys
 - **Image-size agnostic processing** - Works with any input size (32×32 to 512×512+)
 - **ResNet-based architecture** with skip connections and adaptive pooling
 - **Regularized training** with multiple loss components (MSE + L1 + contrastive + divergence)
-- **Sparse embedding layer** with non-negative activations (32D latent space)
+- **Sparse embedding layer** with non-negative activations (variable dimension latent space)
 - **Comprehensive evaluation** with PSNR, SSIM, and MSE metrics
 - **Professional STEM visualization** with virtual bright/dark field imaging
 
@@ -53,8 +53,7 @@ python scripts/visualise_scan_latents.py \
 
 ## 📊 Model Performance
 
-- **Parameter count**: 3,914,404 parameters (consistent across all input sizes)
-- **Latent dimension**: 32D sparse embeddings
+- **Latent dimension**: sparse embeddings
 - **Input flexibility**: 32×32 to 512×512+ diffraction patterns
 - **Reconstruction quality**: PSNR, SSIM, and MSE tracking
 
@@ -114,8 +113,8 @@ L = MSE(y, ŷ) + λ_act·L₁(a) + λ_sim·L_sim + λ_div·L_div
 - `ae.ckpt` - Trained model checkpoint
 - `loss_curve.png` - Training progression
 - `*_reconstruction_comparison.png` - Before/after comparisons
-- `*_stem_visualization.png` - Virtual field analysis
-- `tb_logs/` - TensorBoard logs
+- `*_stem_visualization.png` - Virtual field analysis (TBD)
+- `tb_logs/` - TensorBoard logs (TBD)
 
 ### Analysis Outputs:
 - `embeddings.pt` - Latent space embeddings
