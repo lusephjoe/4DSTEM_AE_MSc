@@ -170,9 +170,8 @@ class AdaptiveDecoder(nn.Module):
         x = self.resnet_up2(x)
         x = self.resnet_up3(x)
         
-        # Final conv and activation
+        # Final conv without activation (like m3_learning)
         x = self.conv_final(x)
-        x = self.sigmoid(x)
         
         # Ensure exact target size
         if x.shape[-1] != self.target_size:

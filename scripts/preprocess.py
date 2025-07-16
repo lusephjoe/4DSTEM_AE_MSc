@@ -9,11 +9,14 @@ except ImportError:
 from scipy.ndimage import gaussian_filter
 
 def normalise(x: np.ndarray) -> np.ndarray:
-    """Scale array to [0,1] float32 with log scaling"""
+    """Z-score normalization with log scaling like m3_learning"""
     x = x.astype("float32")
-    x = np.log(x + 1e-6)  # Log scaling with small epsilon to avoid log(0)
-    x -= x.min()
-    x /= x.max() + 1e-6
+    x = np.log(x + 1)  # Log scaling with +1 to avoid log(0) like m3_learning
+    # Apply z-score normalization (mean=0, std=1)
+    x_flat = x.reshape(-1)
+    mean = np.mean(x_flat)
+    std = np.std(x_flat)
+    x = (x - mean) / (std + 1e-8)  # Small epsilon to avoid division by zero
     return x
 
 def block_bin_mean(arr: np.ndarray, k: int) -> np.ndarray:
