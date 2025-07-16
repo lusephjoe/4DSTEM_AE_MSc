@@ -32,6 +32,7 @@ setup(
             "4dstem-convert=scripts.convert_dm4:main",
             "4dstem-embeddings=scripts.generate_embeddings:main",
             "4dstem-visualize=scripts.visualise_scan_latents:main",
+            "4dstem-stem-viz=scripts.stem_visualization:main",
         ],
     },
 )
