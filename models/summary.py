@@ -187,27 +187,46 @@ def show(model: nn.Module, example_input: torch.Tensor, output_dir: str = None):
         print("PERFORMANCE EVALUATION")
         print("─" * 80)
         
+        # Ensure model is in evaluation mode
+        model.eval()
+        
         with torch.no_grad():
+            # Generate reconstructions
             reconstructed = model(example_input)
-            metrics = calculate_metrics(example_input, reconstructed)
+            
+            # Ensure tensors are on CPU for metrics calculation
+            example_cpu = example_input.cpu()
+            reconstructed_cpu = reconstructed.cpu()
+            
+            # Calculate metrics
+            metrics = calculate_metrics(example_cpu, reconstructed_cpu)
             
             print(f"{'MSE':<20}{metrics['mse']:.6f} ± {metrics['mse_std']:.6f}")
             print(f"{'PSNR (dB)':<20}{metrics['psnr']:.2f} ± {metrics['psnr_std']:.2f}")
             print(f"{'SSIM':<20}{metrics['ssim']:.4f} ± {metrics['ssim_std']:.4f}")
             
+            # Check reconstruction quality
+            if metrics['mse'] > 0.1:
+                print(f"{'WARNING':<20}High MSE - check model training")
+            if metrics['psnr'] < 20:
+                print(f"{'WARNING':<20}Low PSNR - poor reconstruction quality")
+            
             # Save comparison images
             if output_dir:
                 os.makedirs(output_dir, exist_ok=True)
                 comparison_path = os.path.join(output_dir, "reconstruction_comparison.png")
-                save_comparison_images(example_input, reconstructed, comparison_path)
+                save_comparison_images(example_cpu, reconstructed_cpu, comparison_path)
                 print(f"{'Comparison saved to':<20}{comparison_path}")
                 
                 # Save STEM visualization using new module
                 if STEMVisualizer is not None:
-                    stem_path = os.path.join(output_dir, "stem_visualization.png")
-                    visualizer = STEMVisualizer(example_input)
-                    visualizer.save_complete_visualization(stem_path, reconstructed)
-                    print(f"{'STEM visualization':<20}{stem_path}")
+                    try:
+                        stem_path = os.path.join(output_dir, "stem_visualization.png")
+                        visualizer = STEMVisualizer(example_cpu.numpy())
+                        visualizer.save_complete_visualization(stem_path, reconstructed_cpu.numpy())
+                        print(f"{'STEM visualization':<20}{stem_path}")
+                    except Exception as e:
+                        print(f"{'STEM viz warning':<20}Could not create: {e}")
                 else:
                     print("STEM visualization skipped (module not available)")
         

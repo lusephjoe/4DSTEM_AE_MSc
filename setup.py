@@ -33,6 +33,7 @@ setup(
             "4dstem-embeddings=scripts.generate_embeddings:main",
             "4dstem-visualize=scripts.visualise_scan_latents:main",
             "4dstem-stem-viz=scripts.stem_visualization:main",
+            "4dstem-reconstruct=scripts.reconstruct:main",
         ],
     },
 )

@@ -8,3 +8,4 @@ scripts/__pycache__
 .DS_Store
 m3_learning
 py4DSTEM-dev
+models/__pycache__
