@@ -113,13 +113,135 @@ class Autoencoder(nn.Module):
         """Return latent representation without decoding."""
         return self.encoder(x)
     
+    def weighted_mse_loss(self, x: torch.Tensor, x_hat: torch.Tensor, background_weight: float = 0.1) -> torch.Tensor:
+        """
+        Weighted MSE loss that emphasizes diffraction spots over background.
+        
+        Args:
+            x: Ground truth diffraction patterns
+            x_hat: Reconstructed diffraction patterns  
+            background_weight: Weight for background pixels (default: 0.1)
+            
+        Returns:
+            Weighted MSE loss
+        """
+        # Identify signal vs background regions using adaptive threshold
+        # Use mean + 2*std as threshold to identify diffraction spots
+        batch_mean = x.mean(dim=(-2, -1), keepdim=True)
+        batch_std = x.std(dim=(-2, -1), keepdim=True)
+        threshold = batch_mean + 2 * batch_std
+        
+        # Create signal mask (True for diffraction spots)
+        signal_mask = x > threshold
+        
+        # Apply different weights: 1.0 for signal, background_weight for background
+        weights = torch.where(signal_mask, 1.0, background_weight)
+        
+        # Compute weighted MSE
+        squared_diff = (x - x_hat) ** 2
+        weighted_mse = torch.mean(weights * squared_diff)
+        
+        return weighted_mse
+    
+    def high_intensity_loss(self, x: torch.Tensor, x_hat: torch.Tensor, threshold: float = 0.8) -> torch.Tensor:
+        """
+        Focus reconstruction loss on high-intensity diffraction spots.
+        
+        Args:
+            x: Ground truth diffraction patterns
+            x_hat: Reconstructed diffraction patterns
+            threshold: Quantile threshold for high-intensity regions (default: 0.8)
+            
+        Returns:
+            MSE loss for high-intensity regions only
+        """
+        # Find threshold value for top percentile of intensities
+        threshold_val = torch.quantile(x.flatten(-2, -1), threshold, dim=-1, keepdim=True)
+        threshold_val = threshold_val.unsqueeze(-1)  # Add spatial dimensions
+        
+        # Create mask for high-intensity regions
+        mask = x > threshold_val
+        
+        # Apply loss only to high-intensity regions
+        if mask.sum() > 0:
+            return F.mse_loss(x[mask], x_hat[mask])
+        else:
+            return torch.tensor(0.0, device=x.device, dtype=x.dtype)
+    
+    def multiscale_loss(self, x: torch.Tensor, x_hat: torch.Tensor) -> torch.Tensor:
+        """
+        Multi-scale loss to capture both fine details and overall structure.
+        
+        Args:
+            x: Ground truth diffraction patterns
+            x_hat: Reconstructed diffraction patterns
+            
+        Returns:
+            Average MSE loss across multiple scales
+        """
+        loss = 0
+        scales = [1, 2, 4]
+        
+        for scale in scales:
+            if scale > 1:
+                # Downsample using average pooling
+                x_down = F.avg_pool2d(x, scale)
+                x_hat_down = F.avg_pool2d(x_hat, scale)
+            else:
+                x_down, x_hat_down = x, x_hat
+            
+            loss += F.mse_loss(x_down, x_hat_down)
+        
+        return loss / len(scales)
+    
     def compute_loss(self, x: torch.Tensor, x_hat: torch.Tensor, z: torch.Tensor, 
                     lambda_act: float = 1e-4, lambda_sim: float = 5e-5, lambda_div: float = 2e-4, 
-                    ln_parm: int = 1) -> dict:
-        """Compute regularized loss with all components."""
+                    lambda_weighted: float = 0.5, lambda_high: float = 0.3, lambda_multi: float = 0.2,
+                    ln_parm: int = 1, use_improved_loss: bool = True) -> dict:
+        """
+        Compute regularized loss with improved components for sparse diffraction patterns.
         
-        # Main reconstruction loss
-        mse_loss = self.mse_loss(x_hat, x)
+        Args:
+            x: Ground truth diffraction patterns
+            x_hat: Reconstructed diffraction patterns
+            z: Latent representations
+            lambda_act: L1 regularization weight
+            lambda_sim: Contrastive loss weight
+            lambda_div: Divergence loss weight
+            lambda_weighted: Weighted MSE loss weight
+            lambda_high: High-intensity region loss weight  
+            lambda_multi: Multi-scale loss weight
+            ln_parm: Norm parameter for regularization
+            use_improved_loss: Whether to use improved loss components (default: True)
+            
+        Returns:
+            Dictionary with all loss components
+        """
+        
+        if use_improved_loss:
+            # Improved loss components for sparse diffraction patterns
+            # Original MSE with reduced weight
+            mse_loss = self.mse_loss(x_hat, x) * 0.3
+            
+            # Weighted loss for sparse patterns
+            weighted_loss = self.weighted_mse_loss(x, x_hat) * lambda_weighted
+            
+            # High-intensity region loss
+            high_loss = self.high_intensity_loss(x, x_hat) * lambda_high
+            
+            # Multi-scale loss
+            multi_loss = self.multiscale_loss(x, x_hat) * lambda_multi
+            
+            # Combined reconstruction loss
+            reconstruction_loss = mse_loss + weighted_loss + high_loss + multi_loss
+            
+        else:
+            # Original loss function for comparison
+            reconstruction_loss = self.mse_loss(x_hat, x)
+            weighted_loss = torch.tensor(0.0, device=x.device)
+            high_loss = torch.tensor(0.0, device=x.device)
+            multi_loss = torch.tensor(0.0, device=x.device)
+            mse_loss = reconstruction_loss
         
         # Lp norm regularization with batch normalization (like m3_learning)
         batch_size = x.shape[0]
@@ -136,14 +258,18 @@ class Autoencoder(nn.Module):
         divergence_reg = self.divergence_loss(z)
         
         # Total loss (subtract divergence to encourage diversity like m3_learning)
-        total_loss = (mse_loss + 
+        total_loss = (reconstruction_loss + 
                      lambda_act * lp_reg + 
                      lambda_sim * contrastive_reg - 
                      lambda_div * divergence_reg)
         
         return {
             'total_loss': total_loss,
+            'reconstruction_loss': reconstruction_loss,
             'mse_loss': mse_loss,
+            'weighted_loss': weighted_loss,
+            'high_intensity_loss': high_loss,
+            'multiscale_loss': multi_loss,
             'lp_reg': lp_reg,
             'contrastive_reg': contrastive_reg,
             'divergence_reg': divergence_reg

@@ -1,5 +1,6 @@
 outputs/
 outputs_ds/
+outputs_ds_old_loss/
 .python-version
 data/
 CLAUDE.md
