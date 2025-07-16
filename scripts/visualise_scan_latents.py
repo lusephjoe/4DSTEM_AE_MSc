@@ -54,6 +54,46 @@ def radial_mask(shape: tuple[int, int], r_min: float, r_max: float) -> np.ndarra
     return (r >= r_min) & (r < r_max)
 
 
+# Use STEMVisualizer for better compatibility and features
+try:
+    from stem_visualization import STEMVisualizer
+    
+    def create_virtual_detector_image(data: np.ndarray, scan_shape: tuple, mode: str = "bf", **kwargs) -> np.ndarray:
+        """Create virtual detector image using STEMVisualizer."""
+        visualizer = STEMVisualizer(data, scan_shape=scan_shape)
+        
+        if mode == "bf":
+            radius = kwargs.get('bf_radius', 0.1)
+            pattern_size = min(data.shape[-2:])
+            actual_radius = int(radius * pattern_size // 2)
+            return visualizer.create_bright_field_image(radius=actual_radius)
+        elif mode == "df":
+            # Use default dark field region for now
+            return visualizer.create_virtual_field_image(visualizer.dark_field_region)
+        else:
+            raise ValueError(f"Unknown mode: {mode}")
+            
+except ImportError:
+    # Fallback to simple radial mask implementation
+    def create_virtual_detector_image(data: np.ndarray, scan_shape: tuple, mode: str = "bf", **kwargs) -> np.ndarray:
+        """Fallback virtual detector using simple radial masks."""
+        print("Warning: Using fallback virtual detector implementation")
+        
+        if mode == "bf":
+            radius = kwargs.get('bf_radius', 0.1)
+            mask = radial_mask(data.shape[-2:], 0.0, radius)
+        elif mode == "df":
+            r_inner = kwargs.get('df_inner', 0.2)
+            r_outer = kwargs.get('df_outer', 1.0)
+            mask = radial_mask(data.shape[-2:], r_inner, r_outer)
+        else:
+            raise ValueError(f"Unknown mode: {mode}")
+        
+        # Apply mask and reshape
+        virtual_image = np.sum(data * mask, axis=(-2, -1))
+        return virtual_image.reshape(scan_shape)
+
+
 # ───────────────────────────── CLI ─────────────────────────────
 def parse():
     p = argparse.ArgumentParser()
@@ -83,7 +123,7 @@ def main():
     # 1. Load data ------------------------------------------------------------
     raw = load_tensor(args.raw)          # (N,1,Qy,Qx)
     Z = load_tensor(args.latents)        # (N, latent_dim)
-    N, _, Qy, Qx = raw.shape
+    N = raw.shape[0]
 
     # coordinates & mapping ---------------------------------------------------
     if args.coords is not None:
@@ -99,12 +139,11 @@ def main():
     raw_mean = raw.mean(axis=(2, 3)).reshape(Ny, Nx)
 
     # virtual detector --------------------------------------------------------
-    mask = (radial_mask((Qy, Qx),
-                        0.0, args.bf_radius) if args.virtual == "bf"
-            else radial_mask((Qy, Qx), args.df_inner, args.df_outer))
-    virt = (raw[:, 0, mask].mean(axis=1) if args.virtual == "bf"
-            else raw[:, 0, mask].sum(axis=1))        # shape (N,)
-    virt_map = virt.reshape(Ny, Nx)
+    # Use unified virtual detector function
+    virt_map = create_virtual_detector_image(
+        raw[:, 0], (Ny, Nx), mode=args.virtual,
+        bf_radius=args.bf_radius, df_inner=args.df_inner, df_outer=args.df_outer
+    )
 
     # 3. Plot mosaic ----------------------------------------------------------
     latent_dim = Z.shape[1]

@@ -151,7 +151,7 @@ def main():
         example = sample[:1].to(args.device)
         # Ensure model is on the correct device for summary
         model = model.to(args.device)
-        show(model, example_input=example, output_dir=args.output_dir)
+        show(model, example_input=example, output_dir=args.output_dir, include_evaluation=False)
 
         # ---------- logging ----------
     tb_logger = TensorBoardLogger(

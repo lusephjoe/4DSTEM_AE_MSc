@@ -48,7 +48,7 @@ python scripts/visualise_scan_latents.py \
     --raw data/train_tensor.pt \
     --latents outputs/embeddings.pt \
     --scan 42 114 \
-    --outfig outputs/results.png
+    --outfig outputs/latent_mosaic.png
 ```
 
 ## 📊 Model Performance
@@ -60,7 +60,7 @@ python scripts/visualise_scan_latents.py \
 ## 📁 Project Structure
 
 ```
-Custom_4DSTEM_AE/
+4DSTEM_AE_MSc/
 ├── models/           # Neural network architectures
 ├── scripts/          # Training and utility scripts  
 ├── data/             # Input data files
@@ -75,8 +75,7 @@ Custom_4DSTEM_AE/
 - **[Model Architecture](docs/models/README.md)** - Detailed network architecture and components
 - **[Scripts Usage](docs/scripts/README.md)** - Complete guide to all scripts and utilities
 - **[Training Guide](docs/training/README.md)** - Training procedures and hyperparameters
-- **[Visualization](docs/visualization/README.md)** - STEM analysis and visualization features
-- **[API Reference](docs/API.md)** - Complete API documentation
+- **[STEM Visualization](scripts/stem_visualization.py)** - STEM analysis and visualization features
 
 ## 🔬 Architecture Overview
 
@@ -113,8 +112,8 @@ L = MSE(y, ŷ) + λ_act·L₁(a) + λ_sim·L_sim + λ_div·L_div
 - `ae.ckpt` - Trained model checkpoint
 - `loss_curve.png` - Training progression
 - `*_reconstruction_comparison.png` - Before/after comparisons
-- `*_stem_visualization.png` - Virtual field analysis (TBD)
-- `tb_logs/` - TensorBoard logs (TBD)
+- `stem_visualization.png` - Virtual field analysis
+- `tb_logs/` - TensorBoard logs
 
 ### Analysis Outputs:
 - `embeddings.pt` - Latent space embeddings
@@ -122,8 +121,7 @@ L = MSE(y, ŷ) + λ_act·L₁(a) + λ_sim·L_sim + λ_div·L_div
 
 ## 🔧 Requirements
 
-- PyTorch 2.2+
-- PyTorch Lightning 2.2+
+- PyTorch 2.2+ with PyTorch Lightning 2.2+
 - scikit-image (SSIM/PSNR)
 - matplotlib, numpy, h5py, tqdm
 - hyperspy (for .dm4 files)

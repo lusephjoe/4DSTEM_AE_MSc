@@ -91,7 +91,7 @@ def generate_reconstructions(model: LitAE, data: torch.Tensor, device: str = "cp
 
 
 def evaluate_reconstruction_quality(original: torch.Tensor, reconstructed: torch.Tensor) -> dict:
-    """Evaluate reconstruction quality focusing on meaningful regions."""
+    """Evaluate reconstruction quality with comprehensive metrics."""
     # Basic metrics
     metrics = calculate_metrics(original, reconstructed)
     
@@ -120,6 +120,22 @@ def evaluate_reconstruction_quality(original: torch.Tensor, reconstructed: torch
     print(f"Original: mean={orig_mean:.6f}, std={orig_std:.6f}")
     print(f"Reconstruction: mean={recon_mean:.6f}, std={recon_std:.6f}")
     
+    # Overall correlation (key metric for reconstruction quality)
+    orig_flat = original_np.flatten()
+    recon_flat = reconstructed_np.flatten()
+    
+    # Filter out zero regions for meaningful correlation
+    nonzero_mask = (orig_flat > 0) & (recon_flat > 0)
+    if np.any(nonzero_mask):
+        correlation = np.corrcoef(orig_flat[nonzero_mask], recon_flat[nonzero_mask])[0, 1]
+        # Log-space correlation (important for STEM data)
+        orig_log = np.log(orig_flat[nonzero_mask] + 1)
+        recon_log = np.log(recon_flat[nonzero_mask] + 1)
+        log_correlation = np.corrcoef(orig_log, recon_log)[0, 1]
+    else:
+        correlation = 0.0
+        log_correlation = 0.0
+    
     # Calculate metrics only on regions with significant intensity
     threshold = np.percentile(original_np, 90)  # Top 10% of intensities
     mask = original_np > threshold
@@ -133,10 +149,31 @@ def evaluate_reconstruction_quality(original: torch.Tensor, reconstructed: torch
         
         metrics.update({
             'masked_mse': masked_mse,
-            'correlation': masked_correlation,
+            'masked_correlation': masked_correlation,
+            'correlation': correlation,
+            'log_correlation': log_correlation,
             'nonzero_ratio': recon_nonzero / max(orig_nonzero, 1),
-            'intensity_ratio': recon_mean / max(orig_mean, 1e-10)
+            'intensity_ratio': recon_mean / max(orig_mean, 1e-10),
+            'std_ratio': recon_std / max(orig_std, 1e-10)
         })
+    
+    # Assessment of reconstruction quality
+    if correlation > 0.9 and 0.8 < metrics['intensity_ratio'] < 1.2:
+        quality = "EXCELLENT"
+    elif correlation > 0.7 and 0.5 < metrics['intensity_ratio'] < 2.0:
+        quality = "GOOD"
+    elif correlation > 0.5 and 0.1 < metrics['intensity_ratio'] < 5.0:
+        quality = "FAIR"
+    elif correlation > 0.1 and metrics['intensity_ratio'] > 0.01:
+        quality = "POOR"
+    else:
+        quality = "FAILED"
+    
+    metrics['reconstruction_quality'] = quality
+    
+    print(f"Reconstruction Quality Assessment: {quality}")
+    print(f"Overall Correlation: {correlation:.4f}")
+    print(f"Log-space Correlation: {log_correlation:.4f}")
     
     return metrics
 
@@ -180,15 +217,27 @@ def save_detailed_comparison(original: torch.Tensor, reconstructed: torch.Tensor
         axes[1, i].text(10, 10, f'Max: {recon_max:.3f}', color='white', fontsize=8,
                        bbox=dict(boxstyle="round,pad=0.3", facecolor="black", alpha=0.7))
     
-    # Add comprehensive metrics
+    # Add comprehensive metrics with quality assessment
     metrics_text = f"""Reconstruction Analysis:
+Quality: {metrics.get('reconstruction_quality', 'UNKNOWN')}
+
+Basic Metrics:
 MSE: {metrics.get('mse', 0):.6f} ± {metrics.get('mse_std', 0):.6f}
 PSNR: {metrics.get('psnr', 0):.2f} ± {metrics.get('psnr_std', 0):.2f} dB
 SSIM: {metrics.get('ssim', 0):.4f} ± {metrics.get('ssim_std', 0):.4f}
-Masked MSE: {metrics.get('masked_mse', 0):.6f}
-Correlation: {metrics.get('correlation', 0):.4f}
-Non-zero ratio: {metrics.get('nonzero_ratio', 0):.4f}
-Intensity ratio: {metrics.get('intensity_ratio', 0):.4f}"""
+
+Correlation Analysis:
+Overall Correlation: {metrics.get('correlation', 0):.4f}
+Log-space Correlation: {metrics.get('log_correlation', 0):.4f}
+Masked Correlation: {metrics.get('masked_correlation', 0):.4f}
+
+Intensity Preservation:
+Intensity Ratio: {metrics.get('intensity_ratio', 0):.4f}
+Std Ratio: {metrics.get('std_ratio', 0):.4f}
+Non-zero Ratio: {metrics.get('nonzero_ratio', 0):.4f}
+
+High-Intensity Regions:
+Masked MSE: {metrics.get('masked_mse', 0):.6f}"""
     
     plt.figtext(0.02, 0.02, metrics_text, fontsize=10, 
                 bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray", alpha=0.8))

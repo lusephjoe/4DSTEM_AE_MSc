@@ -1,16 +1,19 @@
 # Scripts Documentation
 
-This document provides comprehensive documentation for all utility scripts in the Custom 4D-STEM Autoencoder project.
+This document provides comprehensive documentation for all utility scripts in the 4D-STEM Autoencoder project.
 
 ## 📁 Scripts Overview
 
-The `scripts/` directory contains five main utilities for data processing, training, and analysis:
+The `scripts/` directory contains eight main utilities for data processing, training, and analysis:
 
 1. **`train.py`** - Main training script with PyTorch Lightning
 2. **`convert_dm4.py`** - Digital Micrograph file converter  
 3. **`generate_embeddings.py`** - Latent space embedding generator
 4. **`visualise_scan_latents.py`** - Latent space visualization tool
 5. **`preprocess.py`** - Additional data preprocessing utilities
+6. **`evaluate_autoencoder.py`** - Comprehensive model evaluation and metrics
+7. **`reconstruct.py`** - Reconstruction utilities and analysis
+8. **`stem_visualization.py`** - STEM-specific visualization and analysis tools
 
 ## 🚀 train.py
 
@@ -302,6 +305,61 @@ python scripts/train.py \
 - `CUDA out of memory`: Use `--device cpu` or smaller batch size
 - `File not readable`: Ensure .dm4 files are accessible and valid
 - `Invalid scan dimensions`: Check scan grid matches data dimensions
+
+---
+
+## 📊 evaluate_autoencoder.py
+
+**Purpose**: Comprehensive evaluation of trained autoencoder models with detailed metrics and visualizations
+
+### Usage
+```bash
+python scripts/evaluate_autoencoder.py [OPTIONS]
+```
+
+### Key Arguments
+```bash
+--model PATH             # Path to trained model checkpoint
+--data PATH              # Path to test data (.pt file)
+--output_dir PATH        # Directory for evaluation outputs
+--device DEVICE          # Device (cuda/cpu)
+--batch_size INT         # Batch size for evaluation
+```
+
+### Features
+- Comprehensive reconstruction metrics (PSNR, SSIM, MSE)
+- STEM-specific visualizations
+- Pattern correlation analysis
+- Memory-efficient evaluation
+
+## 🔧 reconstruct.py
+
+**Purpose**: Reconstruction utilities and quality analysis
+
+### Usage
+```bash
+python scripts/reconstruct.py [OPTIONS]
+```
+
+### Features
+- Individual pattern reconstruction
+- Quality assessment tools
+- Visualization utilities
+
+## 🔬 stem_visualization.py
+
+**Purpose**: STEM-specific visualization and analysis tools
+
+### Usage
+```bash
+python scripts/stem_visualization.py [OPTIONS]
+```
+
+### Features
+- Virtual bright/dark field imaging
+- Direct beam position detection
+- Interactive region selection
+- Professional STEM visualizations
 
 ---
 

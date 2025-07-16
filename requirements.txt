@@ -12,6 +12,8 @@ tifffile
 umap-learn~=0.5.9
 plotly~=6.2.0
 scikit-image
+pandas
+seaborn
 
 # dev
 pytest

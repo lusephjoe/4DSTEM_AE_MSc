@@ -161,7 +161,29 @@ except ImportError:
     STEMVisualizer = None
 
 
-def show(model: nn.Module, example_input: torch.Tensor, output_dir: str = None):
+# Compatibility functions for tests
+def create_virtual_field_image(data: np.ndarray, region: tuple, scan_shape: tuple = None) -> np.ndarray:
+    """Create virtual field image (compatibility wrapper)."""
+    if STEMVisualizer is None:
+        raise ImportError("STEMVisualizer not available")
+    
+    visualizer = STEMVisualizer(data, scan_shape=scan_shape)
+    return visualizer.create_virtual_field_image(region)
+
+
+def save_stem_visualization(data: np.ndarray, output_path: str, reconstructed: np.ndarray = None, scan_shape: tuple = None):
+    """Save STEM visualization (compatibility wrapper)."""
+    if STEMVisualizer is None:
+        raise ImportError("STEMVisualizer not available")
+    
+    visualizer = STEMVisualizer(data, scan_shape=scan_shape)
+    if reconstructed is not None:
+        visualizer.save_complete_visualization(output_path, reconstructed)
+    else:
+        visualizer.save_stem_visualization(output_path)
+
+
+def show(model: nn.Module, example_input: torch.Tensor, output_dir: str = None, include_evaluation: bool = True):
     device = example_input.device
     model = model.to(device).eval()
 
@@ -181,8 +203,8 @@ def show(model: nn.Module, example_input: torch.Tensor, output_dir: str = None):
     print(f"{'Trainable':<65}{trainable:>10,}")
     print("─" * 80)
     
-    # Add performance evaluation if output_dir is provided
-    if output_dir and hasattr(model, 'forward'):
+    # Add performance evaluation if output_dir is provided and evaluation is requested
+    if output_dir and hasattr(model, 'forward') and include_evaluation:
         print("\n" + "─" * 80)
         print("PERFORMANCE EVALUATION")
         print("─" * 80)

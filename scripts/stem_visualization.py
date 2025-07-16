@@ -63,8 +63,8 @@ class STEMVisualizer:
         if data.ndim == 4:
             data = data.squeeze(1)  # Remove channel dimension
         
-        # Apply log transformation like m3_learning (add 1 to avoid log(0))
-        self.log_data = np.log(data + 1)
+        # Apply log transformation like m3_learning (handle negative values from reconstructions)
+        self.log_data = np.log(np.maximum(data, 0) + 1)
         
         return data
     
@@ -82,32 +82,91 @@ class STEMVisualizer:
     def _find_direct_beam_position(self) -> Tuple[int, int]:
         """Find the direct beam position (brightest spot) following py4DSTEM approach."""
         # Calculate mean diffraction pattern for beam position detection
-        mean_dp = np.mean(self.data, axis=0)
+        # Use positive values only to handle reconstructed data with negatives
+        mean_dp = np.mean(np.maximum(self.data, 0), axis=0)
         
-        # Apply gaussian filter and find brightest spot
-        r = min(self.pattern_shape) // 20  # Filter radius
-        filtered_dp = gaussian_filter(mean_dp, r)
-        center_y, center_x = np.unravel_index(np.argmax(filtered_dp), filtered_dp.shape)
+        # Auto-detect probe size using py4DSTEM-style approach
+        # Try multiple filter radii and find the most stable one
+        min_size = min(self.pattern_shape)
+        test_radii = [min_size // 50, min_size // 30, min_size // 20, min_size // 15]
         
-        # Refine position using center of mass in circular region
+        best_center = None
+        best_score = 0
+        
+        for r in test_radii:
+            if r < 1:
+                continue
+                
+            # Apply gaussian filter and find brightest spot
+            filtered_dp = gaussian_filter(mean_dp, r, mode='nearest')
+            center_y, center_x = np.unravel_index(np.argmax(filtered_dp), filtered_dp.shape)
+            
+            # Score this center based on peak intensity and sharpness
+            y_indices, x_indices = np.indices(mean_dp.shape)
+            mask = np.hypot(x_indices - center_x, y_indices - center_y) < r * 2
+            peak_intensity = np.max(filtered_dp)
+            background = np.mean(filtered_dp[~mask])
+            score = peak_intensity / (background + 1e-10)  # Signal to background ratio
+            
+            if score > best_score:
+                best_score = score
+                best_center = (center_y, center_x)
+        
+        if best_center is None:
+            # Fallback to simple maximum
+            center_y, center_x = np.unravel_index(np.argmax(mean_dp), mean_dp.shape)
+            return center_y, center_x
+        
+        center_y, center_x = best_center
+        
+        # Refine position using center of mass with optimal radius
+        optimal_r = min_size // 25
         y_indices, x_indices = np.indices(mean_dp.shape)
-        mask = np.hypot(x_indices - center_x, y_indices - center_y) < r * 1.5
+        mask = np.hypot(x_indices - center_x, y_indices - center_y) < optimal_r
         
         # Center of mass calculation
         total_intensity = np.sum(mean_dp * mask)
         if total_intensity > 0:
             x_com = np.sum(x_indices * mean_dp * mask) / total_intensity
             y_com = np.sum(y_indices * mean_dp * mask) / total_intensity
-            return int(y_com), int(x_com)
+            return int(round(y_com)), int(round(x_com))
         else:
             return center_y, center_x
     
     def _default_bright_field_region(self) -> Tuple[int, int, int, int]:
-        """Default bright field region centered on direct beam."""
+        """Default bright field region centered on direct beam (kept for compatibility)."""
         center_y, center_x = self.direct_beam_position
         region_size = min(self.pattern_shape) // 16  # Conservative size
         return (center_y - region_size, center_y + region_size,
                 center_x - region_size, center_x + region_size)
+    
+    def create_bright_field_image(self, radius: Optional[int] = None) -> np.ndarray:
+        """
+        Create bright field image using circular mask centered on direct beam.
+        
+        Args:
+            radius: Radius of circular bright field detector. If None, uses default.
+        
+        Returns:
+            Bright field image (scan_y, scan_x)
+        """
+        center_y, center_x = self.direct_beam_position
+        
+        if radius is None:
+            radius = min(self.pattern_shape) // 20  # Default radius
+        
+        # Create circular mask
+        y_indices, x_indices = np.indices(self.pattern_shape)
+        mask = np.hypot(x_indices - center_x, y_indices - center_y) <= radius
+        
+        # Apply mask to all diffraction patterns and sum
+        virtual_image = np.zeros(self.scan_shape)
+        data_reshaped = self.data.reshape(-1, *self.pattern_shape)
+        
+        for i in range(len(data_reshaped)):
+            virtual_image.flat[i] = np.sum(data_reshaped[i] * mask)
+        
+        return virtual_image
     
     def _default_dark_field_region(self) -> Tuple[int, int, int, int]:
         """Default dark field region (annular) centered on direct beam."""
@@ -234,8 +293,8 @@ class STEMVisualizer:
         self.plot_mean_diffraction_pattern(axes[0], use_log=True)
         axes[0].set_title('Mean Diffraction Pattern (Log)')
         
-        # Bright field image
-        bf_image = self.create_virtual_field_image(self.bright_field_region)
+        # Bright field image (using circular mask)
+        bf_image = self.create_bright_field_image()
         im1 = axes[1].imshow(bf_image, cmap='gray')
         axes[1].set_title('Virtual Bright Field')
         axes[1].axis('off')
@@ -314,8 +373,8 @@ class STEMVisualizer:
         axes[ax_idx // cols, ax_idx % cols].set_title('Mean Diffraction Pattern (Log)')
         ax_idx += 1
         
-        # Bright field
-        bf_image = self.create_virtual_field_image(self.bright_field_region)
+        # Bright field (using circular mask)
+        bf_image = self.create_bright_field_image()
         im = axes[ax_idx // cols, ax_idx % cols].imshow(bf_image, cmap='gray')
         axes[ax_idx // cols, ax_idx % cols].set_title('Virtual Bright Field')
         axes[ax_idx // cols, ax_idx % cols].axis('off')
@@ -345,8 +404,8 @@ class STEMVisualizer:
             axes[ax_idx // cols, ax_idx % cols].set_title('Reconstructed Mean Pattern')
             ax_idx += 1
             
-            # Reconstructed bright field
-            comp_bf = comp_viz.create_virtual_field_image(self.bright_field_region)
+            # Reconstructed bright field (using circular mask)
+            comp_bf = comp_viz.create_bright_field_image()
             axes[ax_idx // cols, ax_idx % cols].imshow(comp_bf, cmap='gray')
             axes[ax_idx // cols, ax_idx % cols].set_title('Reconstructed Bright Field')
             axes[ax_idx // cols, ax_idx % cols].axis('off')
@@ -474,8 +533,8 @@ def main():
     visualizer.plot_mean_diffraction_pattern(axes[0], use_log=True, add_scalebar=True)
     axes[0].set_title('Mean Diffraction Pattern (Log)')
     
-    # Bright field image with scalebar
-    bf_image = visualizer.create_virtual_field_image(visualizer.bright_field_region)
+    # Bright field image with scalebar (using circular mask)
+    bf_image = visualizer.create_bright_field_image()
     axes[1].imshow(bf_image, cmap='gray')
     axes[1].set_title('Virtual Bright Field')
     axes[1].axis('off')
