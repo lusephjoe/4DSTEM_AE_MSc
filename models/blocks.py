@@ -218,7 +218,7 @@ class DivergenceLoss(nn.Module):
         super().__init__()
     
     def forward(self, embeddings: torch.Tensor) -> torch.Tensor:
-        # Encourage different activations across the batch
-        # Penalize if activations are too similar across batch
+        # Encourage different activations across the batch (like m3_learning)
+        # Return variance to be maximized (subtracted from loss)
         variance = torch.var(embeddings, dim=0)
-        return torch.mean(1.0 / (variance + 1e-8))
+        return torch.mean(variance)

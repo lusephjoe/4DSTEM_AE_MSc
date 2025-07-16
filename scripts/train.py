@@ -41,7 +41,7 @@ class LitAE(pl.LightningModule):
         # Log loss components
         self.log("train_loss", loss, prog_bar=True)
         self.log("train_mse", loss_dict['mse_loss'], prog_bar=False)
-        self.log("train_l1_reg", loss_dict['l1_reg'], prog_bar=False)
+        self.log("train_lp_reg", loss_dict['lp_reg'], prog_bar=False)
         self.log("train_contrastive_reg", loss_dict['contrastive_reg'], prog_bar=False)
         self.log("train_divergence_reg", loss_dict['divergence_reg'], prog_bar=False)
 

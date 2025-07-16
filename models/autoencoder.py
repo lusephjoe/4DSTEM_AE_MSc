@@ -114,14 +114,20 @@ class Autoencoder(nn.Module):
         return self.encoder(x)
     
     def compute_loss(self, x: torch.Tensor, x_hat: torch.Tensor, z: torch.Tensor, 
-                    lambda_act: float = 1e-4, lambda_sim: float = 5e-5, lambda_div: float = 2e-4) -> dict:
+                    lambda_act: float = 1e-4, lambda_sim: float = 5e-5, lambda_div: float = 2e-4, 
+                    ln_parm: int = 1) -> dict:
         """Compute regularized loss with all components."""
         
         # Main reconstruction loss
         mse_loss = self.mse_loss(x_hat, x)
         
-        # L1 regularization on activations (sparsity)
-        l1_reg = self.l1_loss(z, torch.zeros_like(z))
+        # Lp norm regularization with batch normalization (like m3_learning)
+        batch_size = x.shape[0]
+        lp_reg = torch.norm(z, ln_parm) / batch_size
+        
+        # Handle zero case like m3_learning
+        if lp_reg == 0:
+            lp_reg = torch.tensor(0.5, device=z.device)
         
         # Contrastive similarity regularization
         contrastive_reg = self.contrastive_loss(z)
@@ -129,16 +135,16 @@ class Autoencoder(nn.Module):
         # Activation divergence regularization
         divergence_reg = self.divergence_loss(z)
         
-        # Total loss
+        # Total loss (subtract divergence to encourage diversity like m3_learning)
         total_loss = (mse_loss + 
-                     lambda_act * l1_reg + 
-                     lambda_sim * contrastive_reg + 
+                     lambda_act * lp_reg + 
+                     lambda_sim * contrastive_reg - 
                      lambda_div * divergence_reg)
         
         return {
             'total_loss': total_loss,
             'mse_loss': mse_loss,
-            'l1_reg': l1_reg,
+            'lp_reg': lp_reg,
             'contrastive_reg': contrastive_reg,
             'divergence_reg': divergence_reg
         }
