@@ -16,6 +16,9 @@ Extra features
 from __future__ import annotations
 import argparse
 from pathlib import Path
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor
+import os
 
 import numpy as np
 import torch
@@ -74,6 +77,40 @@ def downsample_patterns(data: np.ndarray, k: int, mode: str, sigma: float) -> np
         return fft_crop(data, k)
     raise ValueError(f"Unknown down-sampling mode: {mode}")
 
+
+def process_chunk_worker(args_tuple):
+    """Worker function for multiprocessing - processes a chunk of rows."""
+    file_path, row_start, row_end, scan_step, downsample, mode, sigma = args_tuple
+    
+    try:
+        # Load the file in each worker process
+        sig = hs.load(str(file_path), lazy=True)
+        
+        # Apply scan step to row indices
+        scan_row_start = row_start * scan_step
+        scan_row_end = row_end * scan_step
+        
+        # Load this chunk of rows
+        chunk_data = sig.data[scan_row_start:scan_row_end:scan_step, ::scan_step].compute()
+        
+        # Apply downsampling
+        if downsample > 1:
+            chunk_data = downsample_patterns(chunk_data, downsample, mode, sigma)
+        
+        # Apply normalization
+        chunk_data = normalise(chunk_data)
+        
+        # Reshape to (patterns, qy, qx)
+        chunk_rows, chunk_cols, qy_processed, qx_processed = chunk_data.shape
+        chunk_data = chunk_data.reshape(chunk_rows * chunk_cols, qy_processed, qx_processed)
+        
+        return chunk_data
+        
+    except Exception as e:
+        print(f"Error processing chunk rows {row_start}-{row_end}: {e}")
+        return None
+
+
 # ───────────────────────────── CLI ─────────────────────────────
 
 def main():
@@ -92,7 +129,15 @@ def main():
                    help="Maximum memory to use during conversion (GB)")
     p.add_argument("--compress", action="store_true",
                    help="Enable compression when saving (reduces file size)")
+    p.add_argument("--num_workers", type=int, default=None,
+                   help="Number of worker processes (default: CPU count)")
     args = p.parse_args()
+    
+    # Set up multiprocessing
+    if args.num_workers is None:
+        args.num_workers = min(mp.cpu_count(), 8)  # Cap at 8 to avoid too many processes
+    
+    print(f"Using {args.num_workers} worker processes")
 
     # Load .dm4 with lazy loading to check size first
     print(f"Loading {args.input} (lazy mode to check size)...")
@@ -129,53 +174,56 @@ def main():
     if estimated_memory_gb > args.max_memory_gb:
         print(f"Large file detected ({estimated_memory_gb:.2f} GB > {args.max_memory_gb:.2f} GB)")
         print("For large files, consider using --downsample or --scan_step to reduce size")
-        print("Processing with optimized chunking...")
+        print("Processing with multiprocessing chunking...")
         
-        # For very large files, it's better to compute in smaller chunks
-        # But we need to be smarter about chunk size to avoid too many I/O operations
-        
-        # Use a more aggressive chunk size based on full rows
+        # Calculate chunk size based on number of workers and memory
         patterns_per_row = nx
-        full_rows_that_fit = max(1, int(args.max_memory_gb * 1024 / (patterns_per_row * pattern_size_mb)))
-        full_rows_that_fit = min(full_rows_that_fit, ny)
+        rows_per_worker = max(1, int(args.max_memory_gb * 1024 / (patterns_per_row * pattern_size_mb * args.num_workers)))
+        rows_per_worker = min(rows_per_worker, ny)
         
-        print(f"Processing {full_rows_that_fit} full rows at a time...")
+        print(f"Processing {rows_per_worker} rows per worker...")
         
-        # Process in row chunks
+        # Create work chunks
+        work_chunks = []
+        for row_start in range(0, ny, rows_per_worker):
+            row_end = min(row_start + rows_per_worker, ny)
+            work_chunks.append((
+                args.input,
+                row_start, 
+                row_end,
+                args.scan_step,
+                args.downsample,
+                args.mode,
+                args.sigma
+            ))
+        
+        print(f"Created {len(work_chunks)} work chunks")
+        
+        # Process chunks in parallel
         all_tensors = []
         
-        for row_start in range(0, ny, full_rows_that_fit):
-            row_end = min(row_start + full_rows_that_fit, ny)
-            
-            print(f"Processing rows {row_start} to {row_end-1}...")
-            
-            # Apply scan step to row indices
-            scan_row_start = row_start * args.scan_step
-            scan_row_end = row_end * args.scan_step
-            
-            # Load this chunk of rows
-            chunk_data = sig.data[scan_row_start:scan_row_end:args.scan_step, ::args.scan_step].compute()
-            
-            # Apply scan step and downsampling
-            if args.downsample > 1:
-                chunk_data = downsample_patterns(chunk_data, args.downsample, args.mode, args.sigma)
-            
-            # Apply normalization
-            chunk_data = normalise(chunk_data)
-            
-            # Reshape to (patterns, qy, qx) and add channel dimension
-            chunk_rows, chunk_cols, qy_processed, qx_processed = chunk_data.shape
-            chunk_data = chunk_data.reshape(chunk_rows * chunk_cols, qy_processed, qx_processed)
-            chunk_tensor = torch.from_numpy(chunk_data).unsqueeze(1)
-            
-            all_tensors.append(chunk_tensor)
-            
-            # Clear memory
-            del chunk_data, chunk_tensor
-            
-            # Force garbage collection
-            import gc
-            gc.collect()
+        if args.num_workers == 1:
+            # Single-threaded processing
+            for i, chunk_args in enumerate(work_chunks):
+                print(f"Processing chunk {i+1}/{len(work_chunks)} (rows {chunk_args[1]}-{chunk_args[2]-1})...")
+                chunk_data = process_chunk_worker(chunk_args)
+                if chunk_data is not None:
+                    chunk_tensor = torch.from_numpy(chunk_data).unsqueeze(1)
+                    all_tensors.append(chunk_tensor)
+                    del chunk_data, chunk_tensor
+        else:
+            # Multi-threaded processing
+            with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
+                print("Starting parallel processing...")
+                futures = [executor.submit(process_chunk_worker, chunk_args) for chunk_args in work_chunks]
+                
+                for i, future in enumerate(futures):
+                    print(f"Collecting result {i+1}/{len(futures)}...")
+                    chunk_data = future.result()
+                    if chunk_data is not None:
+                        chunk_tensor = torch.from_numpy(chunk_data).unsqueeze(1)
+                        all_tensors.append(chunk_tensor)
+                        del chunk_data, chunk_tensor
         
         # Concatenate all chunks
         print("Concatenating all chunks...")
@@ -221,4 +269,6 @@ def main():
     print(f"Saved {tensor.shape[0]} patterns of size {tensor.shape[2]}x{tensor.shape[3]} → {args.output}")
 
 if __name__ == "__main__":
+    # Required for Windows multiprocessing
+    mp.freeze_support()
     main()

@@ -16,6 +16,7 @@ python scripts/generate_embeddings.py \
 from pathlib import Path
 import argparse, torch
 from sklearn.decomposition import PCA  # CPU PCA is fine for ≤10⁴ samples
+from tqdm import tqdm
 import sys
 sys.path.append(str(Path(__file__).parent.parent.parent))
 from models.summary import show
@@ -48,7 +49,10 @@ def main():
     encoder.eval().to(device)
 
     # ---------- load data ---------- #
+    print("Loading data...")
     data = torch.load(args.input, map_location="cpu")  # shape [N, signal_dim]
+    print(f"Loaded {data.shape[0]} samples of shape {data.shape[1:]}")
+    
     loader = torch.utils.data.DataLoader(data,
                                          batch_size=args.batch_size,
                                          shuffle=False,
@@ -57,24 +61,37 @@ def main():
     example = data[:1].to(device)          # <‑‑ one real sample, preserves dims
     show(encoder, example_input=example)  
     
+    print("Generating embeddings...")
     latents = []
-    for batch in loader:
+    for batch in tqdm(loader, desc="Processing batches", unit="batch"):
         batch = batch.to(device, non_blocking=True)
         z = encoder(batch).cpu()
         latents.append(z)
 
+    print("Concatenating results...")
     latents = torch.cat(latents, dim=0)  # [N, latent_dim]
+    print(f"Generated embeddings shape: {latents.shape}")
 
     # ---------- optional PCA ---------- #
     if args.pca > 0 and args.pca < latents.size(1):
-        print(f"Running PCA → {args.pca} D …")
+        print(f"Running PCA to reduce from {latents.size(1)} to {args.pca} dimensions...")
         pca = PCA(args.pca, svd_solver="randomized")
-        latents = torch.tensor(pca.fit_transform(latents.numpy()))
+        latents_pca = pca.fit_transform(latents.numpy())
+        latents = torch.tensor(latents_pca)
+        print(f"PCA completed. Explained variance ratio: {pca.explained_variance_ratio_[:5]}")  # Show first 5 components
 
     # ---------- save ---------- #
+    print("Saving embeddings...")
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     torch.save(latents, args.output)
-    print(f"Wrote {latents.shape}  →  {args.output}")
+    print(f"✓ Saved embeddings {latents.shape} → {args.output}")
+    
+    # Show some statistics
+    print(f"\nEmbedding statistics:")
+    print(f"  Mean: {latents.mean():.4f}")
+    print(f"  Std:  {latents.std():.4f}")
+    print(f"  Min:  {latents.min():.4f}")
+    print(f"  Max:  {latents.max():.4f}")
 
 if __name__ == "__main__":
     main()
