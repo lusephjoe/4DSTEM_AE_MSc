@@ -116,8 +116,7 @@ class LitAE(pl.LightningModule):
             optimizer, 
             mode='min', 
             factor=0.5, 
-            patience=10, 
-            verbose=True
+            patience=10
         )
         
         return {

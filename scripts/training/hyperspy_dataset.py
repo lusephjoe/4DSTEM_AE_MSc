@@ -475,12 +475,16 @@ class ChunkedHyperSpyDataset(Dataset):
                     # Remove oldest chunk
                     oldest_key = self.cache_keys.pop(0)
                     if oldest_key in self.cache:
-                        # Clear chunk data explicitly before deletion
+                        # Clear chunk data with safe cleanup
                         chunk_to_delete = self.cache[oldest_key]
                         if isinstance(chunk_to_delete, dict):
                             for k, v in chunk_to_delete.items():
-                                if hasattr(v, 'data') and hasattr(v.data, 'storage'):
-                                    v.data.storage().resize_(0)
+                                # Safer cleanup - just delete references
+                                if hasattr(v, 'data'):
+                                    try:
+                                        del v.data
+                                    except:
+                                        pass
                         del self.cache[oldest_key]
                         del chunk_to_delete
                         
@@ -537,13 +541,17 @@ class ChunkedHyperSpyDataset(Dataset):
         return self.base_dataset.get_shape()
     
     def close(self):
-        """Close the base dataset and clear cache with aggressive cleanup."""
-        # Clear cache with explicit tensor cleanup
+        """Close the base dataset and clear cache with safe cleanup."""
+        # Clear cache with safe tensor cleanup
         for chunk_key, chunk_data in self.cache.items():
             if isinstance(chunk_data, dict):
                 for k, v in chunk_data.items():
-                    if hasattr(v, 'data') and hasattr(v.data, 'storage'):
-                        v.data.storage().resize_(0)
+                    # Safer cleanup - just delete references instead of resizing storage
+                    if hasattr(v, 'data'):
+                        try:
+                            del v.data
+                        except:
+                            pass
         
         self.cache.clear()
         self.cache_keys.clear()
