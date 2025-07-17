@@ -72,10 +72,6 @@ def main():
     encoder = Encoder()
     encoder.load_state_dict(state, strict=False)
     encoder.eval().to(device)
-    
-    # Optimize model for inference
-    if device.type == "cuda":
-        encoder = torch.compile(encoder, mode="reduce-overhead") if hasattr(torch, "compile") else encoder
 
     # ---------- load data ---------- #
     print("Loading data...")
@@ -109,7 +105,19 @@ def main():
     )
 
     example = data[:1].to(device)          # <‑‑ one real sample, preserves dims
-    show(encoder, example_input=example)  
+    try:
+        show(encoder, example_input=example)  
+    except Exception as e:
+        print(f"Warning: Could not display model summary: {e}")
+    
+    # Optimize model for inference (after summary to avoid compilation conflicts)
+    if device.type == "cuda":
+        try:
+            if hasattr(torch, "compile"):
+                encoder = torch.compile(encoder, mode="reduce-overhead")
+                print("Model compiled with torch.compile for faster inference")
+        except Exception as e:
+            print(f"Warning: Could not compile model: {e}")
     
     print("Generating embeddings...")
     latents = []
