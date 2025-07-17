@@ -279,6 +279,7 @@ def main():
     # Create data loaders with optimized settings
     def create_dataloader(dataset, batch_size, shuffle, num_workers, pin_memory, persistent_workers, prefetch_factor, drop_last=False):
         """Create DataLoader with proper settings."""
+        from torch.utils.data import DataLoader
         return DataLoader(
             dataset, 
             batch_size=batch_size, 
