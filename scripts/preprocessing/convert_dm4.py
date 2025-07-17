@@ -136,37 +136,39 @@ def main():
         
         print(f"Processing {chunk_size} patterns at a time...")
         
-        # Process in chunks
+        # Process in chunks by loading rectangular regions
         all_tensors = []
         
-        for i in range(0, total_patterns, chunk_size):
-            end_idx = min(i + chunk_size, total_patterns)
-            print(f"Processing patterns {i} to {end_idx-1} ({end_idx-i} patterns)...")
+        # Calculate how many scan positions we can fit in a chunk
+        patterns_per_row = nx
+        rows_per_chunk = max(1, chunk_size // patterns_per_row)
+        
+        print(f"Processing {rows_per_chunk} rows at a time...")
+        
+        for row_start in range(0, ny, rows_per_chunk):
+            row_end = min(row_start + rows_per_chunk, ny)
+            patterns_in_chunk = (row_end - row_start) * nx
             
-            # Load chunk of data
-            chunk_patterns = []
-            for idx in range(i, end_idx):
-                # Convert linear index to 2D coordinates
-                row = idx // nx
-                col = idx % nx
-                
-                # Apply scan step
-                scan_row = row * args.scan_step
-                scan_col = col * args.scan_step
-                
-                # Load single pattern
-                pattern = sig.data[scan_row, scan_col].compute()
-                chunk_patterns.append(pattern)
+            print(f"Processing rows {row_start} to {row_end-1} ({patterns_in_chunk} patterns)...")
             
-            # Stack chunk patterns
-            chunk_data = np.stack(chunk_patterns, axis=0)  # Shape: (chunk_size, qy, qx)
+            # Load rectangular chunk of data
+            scan_row_start = row_start * args.scan_step
+            scan_row_end = row_end * args.scan_step
+            
+            # Load chunk as rectangular region
+            chunk_data = sig.data[scan_row_start:scan_row_end:args.scan_step, ::args.scan_step].compute()
+            
+            # Reshape to (patterns, qy, qx)
+            chunk_rows, chunk_cols, qy, qx = chunk_data.shape
+            chunk_data = chunk_data.reshape(chunk_rows * chunk_cols, qy, qx)
             
             # Apply downsampling to chunk
             if args.downsample > 1:
-                # Add dummy dimensions to match downsample_patterns expected input
-                chunk_data = chunk_data.reshape(1, chunk_data.shape[0], chunk_data.shape[1], chunk_data.shape[2])
+                # Reshape to match downsample_patterns expected input (ny, nx, qy, qx)
+                chunk_data = chunk_data.reshape(chunk_rows, chunk_cols, qy, qx)
                 chunk_data = downsample_patterns(chunk_data, args.downsample, args.mode, args.sigma)
-                chunk_data = chunk_data.reshape(chunk_data.shape[1], chunk_data.shape[2], chunk_data.shape[3])
+                # Reshape back to (patterns, qy, qx)
+                chunk_data = chunk_data.reshape(chunk_rows * chunk_cols, chunk_data.shape[2], chunk_data.shape[3])
             
             # Apply normalization to chunk
             chunk_data = normalise(chunk_data)
@@ -176,7 +178,7 @@ def main():
             all_tensors.append(chunk_tensor)
             
             # Clear memory
-            del chunk_patterns, chunk_data, chunk_tensor
+            del chunk_data, chunk_tensor
         
         # Concatenate all chunks
         print("Concatenating all chunks...")
