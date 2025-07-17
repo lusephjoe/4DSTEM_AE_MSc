@@ -155,7 +155,7 @@ def save_comparison_images(original: torch.Tensor, reconstructed: torch.Tensor,
 # STEM visualization functions moved to scripts/stem_visualization.py
 # Import them here for backwards compatibility
 try:
-    from scripts.stem_visualization import STEMVisualizer
+    from scripts.visualization.stem_visualization import STEMVisualizer
 except ImportError:
     print("Warning: stem_visualization module not found. STEM visualization features unavailable.")
     STEMVisualizer = None

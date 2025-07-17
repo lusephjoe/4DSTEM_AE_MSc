@@ -21,7 +21,11 @@ import sys
 sys.path.append(str(Path(__file__).parent.parent.parent))
 from models.autoencoder import Autoencoder
 from models.summary import calculate_metrics
-from .stem_visualization import STEMVisualizer
+try:
+    from .stem_visualization import STEMVisualizer
+except ImportError:
+    print("Warning: stem_visualization module not found. STEM visualization features unavailable.")
+    STEMVisualizer = None
 
 class LitAE(pl.LightningModule):
     """Lightning module wrapper for loading trained models."""
