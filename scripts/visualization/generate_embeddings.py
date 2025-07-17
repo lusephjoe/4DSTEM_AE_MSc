@@ -41,6 +41,8 @@ def parse_args():
                    help="Number of batches to prefetch per worker")
     p.add_argument("--optimize_memory", action="store_true",
                    help="Enable memory optimizations for large datasets")
+    p.add_argument("--no_compile", action="store_true",
+                   help="Disable torch.compile optimization")
     return p.parse_args()
 
 @torch.no_grad()
@@ -111,13 +113,24 @@ def main():
         print(f"Warning: Could not display model summary: {e}")
     
     # Optimize model for inference (after summary to avoid compilation conflicts)
-    if device.type == "cuda":
+    compiled_successfully = False
+    if device.type == "cuda" and not args.no_compile:
         try:
+            # Check if Triton is available before attempting compilation
+            import triton
             if hasattr(torch, "compile"):
                 encoder = torch.compile(encoder, mode="reduce-overhead")
+                compiled_successfully = True
                 print("Model compiled with torch.compile for faster inference")
+        except ImportError:
+            print("Warning: Triton not available - torch.compile disabled. Install with: pip install triton")
         except Exception as e:
             print(f"Warning: Could not compile model: {e}")
+    elif args.no_compile:
+        print("torch.compile disabled by user (--no_compile flag)")
+    
+    if not compiled_successfully:
+        print("Using standard PyTorch inference (torch.compile not available)")
     
     print("Generating embeddings...")
     latents = []
