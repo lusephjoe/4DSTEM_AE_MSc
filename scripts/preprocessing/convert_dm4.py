@@ -128,57 +128,54 @@ def main():
     
     if estimated_memory_gb > args.max_memory_gb:
         print(f"Large file detected ({estimated_memory_gb:.2f} GB > {args.max_memory_gb:.2f} GB)")
-        print("Processing in chunks to reduce RAM usage...")
+        print("For large files, consider using --downsample or --scan_step to reduce size")
+        print("Processing with optimized chunking...")
         
-        # Calculate chunk size based on memory limit
-        chunk_size = max(1, int(args.max_memory_gb * 1024 / pattern_size_mb))
-        chunk_size = min(chunk_size, total_patterns)  # Don't exceed total patterns
+        # For very large files, it's better to compute in smaller chunks
+        # But we need to be smarter about chunk size to avoid too many I/O operations
         
-        print(f"Processing {chunk_size} patterns at a time...")
+        # Use a more aggressive chunk size based on full rows
+        patterns_per_row = nx
+        full_rows_that_fit = max(1, int(args.max_memory_gb * 1024 / (patterns_per_row * pattern_size_mb)))
+        full_rows_that_fit = min(full_rows_that_fit, ny)
         
-        # Process in chunks by loading rectangular regions
+        print(f"Processing {full_rows_that_fit} full rows at a time...")
+        
+        # Process in row chunks
         all_tensors = []
         
-        # Calculate how many scan positions we can fit in a chunk
-        patterns_per_row = nx
-        rows_per_chunk = max(1, chunk_size // patterns_per_row)
-        
-        print(f"Processing {rows_per_chunk} rows at a time...")
-        
-        for row_start in range(0, ny, rows_per_chunk):
-            row_end = min(row_start + rows_per_chunk, ny)
-            patterns_in_chunk = (row_end - row_start) * nx
+        for row_start in range(0, ny, full_rows_that_fit):
+            row_end = min(row_start + full_rows_that_fit, ny)
             
-            print(f"Processing rows {row_start} to {row_end-1} ({patterns_in_chunk} patterns)...")
+            print(f"Processing rows {row_start} to {row_end-1}...")
             
-            # Load rectangular chunk of data
+            # Apply scan step to row indices
             scan_row_start = row_start * args.scan_step
             scan_row_end = row_end * args.scan_step
             
-            # Load chunk as rectangular region
+            # Load this chunk of rows
             chunk_data = sig.data[scan_row_start:scan_row_end:args.scan_step, ::args.scan_step].compute()
             
-            # Reshape to (patterns, qy, qx)
-            chunk_rows, chunk_cols, qy, qx = chunk_data.shape
-            chunk_data = chunk_data.reshape(chunk_rows * chunk_cols, qy, qx)
-            
-            # Apply downsampling to chunk
+            # Apply scan step and downsampling
             if args.downsample > 1:
-                # Reshape to match downsample_patterns expected input (ny, nx, qy, qx)
-                chunk_data = chunk_data.reshape(chunk_rows, chunk_cols, qy, qx)
                 chunk_data = downsample_patterns(chunk_data, args.downsample, args.mode, args.sigma)
-                # Reshape back to (patterns, qy, qx)
-                chunk_data = chunk_data.reshape(chunk_rows * chunk_cols, chunk_data.shape[2], chunk_data.shape[3])
             
-            # Apply normalization to chunk
+            # Apply normalization
             chunk_data = normalise(chunk_data)
             
-            # Convert to tensor with channel dimension
-            chunk_tensor = torch.from_numpy(chunk_data).unsqueeze(1)  # Shape: (chunk_size, 1, qy, qx)
+            # Reshape to (patterns, qy, qx) and add channel dimension
+            chunk_rows, chunk_cols, qy_processed, qx_processed = chunk_data.shape
+            chunk_data = chunk_data.reshape(chunk_rows * chunk_cols, qy_processed, qx_processed)
+            chunk_tensor = torch.from_numpy(chunk_data).unsqueeze(1)
+            
             all_tensors.append(chunk_tensor)
             
             # Clear memory
             del chunk_data, chunk_tensor
+            
+            # Force garbage collection
+            import gc
+            gc.collect()
         
         # Concatenate all chunks
         print("Concatenating all chunks...")
