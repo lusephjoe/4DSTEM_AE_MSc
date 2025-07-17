@@ -56,7 +56,7 @@ def radial_mask(shape: tuple[int, int], r_min: float, r_max: float) -> np.ndarra
 
 # Use STEMVisualizer for better compatibility and features
 try:
-    from stem_visualization import STEMVisualizer
+    from .stem_visualization import STEMVisualizer
     
     def create_virtual_detector_image(data: np.ndarray, scan_shape: tuple, mode: str = "bf", **kwargs) -> np.ndarray:
         """Create virtual detector image using STEMVisualizer."""

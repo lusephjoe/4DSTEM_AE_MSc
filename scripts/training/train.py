@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, TensorDataset
 from pathlib import Path
 import sys
-sys.path.append(str(Path(__file__).parent.parent))
+sys.path.append(str(Path(__file__).parent.parent.parent))
 from models.autoencoder import Autoencoder
 from models.summary import show, calculate_metrics
 

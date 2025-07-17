@@ -16,6 +16,8 @@ python scripts/generate_embeddings.py \
 from pathlib import Path
 import argparse, torch
 from sklearn.decomposition import PCA  # CPU PCA is fine for ≤10⁴ samples
+import sys
+sys.path.append(str(Path(__file__).parent.parent.parent))
 from models.summary import show
 
 def parse_args():

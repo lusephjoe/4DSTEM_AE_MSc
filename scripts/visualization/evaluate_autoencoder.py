@@ -17,9 +17,11 @@ from typing import Optional, Dict, Tuple
 import seaborn as sns
 from sklearn.metrics import r2_score
 from scipy import stats
+import sys
+sys.path.append(str(Path(__file__).parent.parent.parent))
 from models.autoencoder import Autoencoder
 from models.summary import calculate_metrics
-from scripts.stem_visualization import STEMVisualizer
+from .stem_visualization import STEMVisualizer
 
 class LitAE(pl.LightningModule):
     """Lightning module wrapper for loading trained models."""

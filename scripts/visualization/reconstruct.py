@@ -14,9 +14,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import Optional
+import sys
+sys.path.append(str(Path(__file__).parent.parent.parent))
 from models.autoencoder import Autoencoder
 from models.summary import calculate_metrics, save_comparison_images
-from scripts.stem_visualization import STEMVisualizer
+from .stem_visualization import STEMVisualizer
 
 
 class LitAE(pl.LightningModule):
