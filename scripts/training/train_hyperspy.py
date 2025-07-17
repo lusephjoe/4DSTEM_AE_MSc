@@ -228,15 +228,24 @@ def main():
     train_wrapped = TensorDatasetWrapper(train_dataset)
     val_wrapped = TensorDatasetWrapper(val_dataset)
     
-    # Create data loaders with original settings
+    # Optimize data loader settings for large datasets
+    optimal_workers = min(args.num_workers, 4)  # Limit workers to prevent memory issues
+    if total_size > 10000:  # For large datasets
+        optimal_workers = min(optimal_workers, 2)
+        prefetch_factor = 1
+        print(f"Large dataset detected ({total_size} samples), using {optimal_workers} workers")
+    else:
+        prefetch_factor = 2
+    
+    # Create data loaders with optimized settings
     train_dl = DataLoader(
         train_wrapped, 
         batch_size=args.batch, 
         shuffle=True, 
-        num_workers=args.num_workers,
+        num_workers=optimal_workers,
         pin_memory=args.pin_memory and args.device == "cuda",
-        persistent_workers=args.persistent_workers and args.num_workers > 0,
-        prefetch_factor=2 if args.num_workers > 0 else 2,
+        persistent_workers=args.persistent_workers and optimal_workers > 0,
+        prefetch_factor=prefetch_factor,
         drop_last=True
     )
     
@@ -244,10 +253,10 @@ def main():
         val_wrapped, 
         batch_size=args.batch, 
         shuffle=False, 
-        num_workers=args.num_workers,
+        num_workers=optimal_workers,
         pin_memory=args.pin_memory and args.device == "cuda",
-        persistent_workers=args.persistent_workers and args.num_workers > 0,
-        prefetch_factor=2 if args.num_workers > 0 else 2
+        persistent_workers=args.persistent_workers and optimal_workers > 0,
+        prefetch_factor=prefetch_factor
     )
 
     # Get sample shape
