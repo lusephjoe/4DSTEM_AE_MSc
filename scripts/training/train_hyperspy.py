@@ -13,6 +13,17 @@ from hyperspy_dataset import HyperSpyDataset, ChunkedHyperSpyDataset
 import warnings
 warnings.filterwarnings("ignore", ".*does not have many workers.*")
 
+class TensorDatasetWrapper:
+    """Wrapper to make HyperSpy datasets compatible with PyTorch DataLoader multiprocessing."""
+    def __init__(self, dataset):
+        self.dataset = dataset
+    
+    def __len__(self):
+        return len(self.dataset)
+    
+    def __getitem__(self, idx):
+        return (self.dataset[idx],)  # Return as tuple to match TensorDataset
+
 class LitAE(pl.LightningModule):
     def __init__(self, latent_dim: int, lr: float, realtime_metrics: bool = False, 
                  lambda_act: float = 1e-4, lambda_sim: float = 5e-5, lambda_div: float = 2e-4,
@@ -215,16 +226,6 @@ def main():
     print(f"Dataset split: {train_size} train, {val_size} validation")
     
     # Create data loaders with wrapper to match original format
-    class TensorDatasetWrapper:
-        def __init__(self, dataset):
-            self.dataset = dataset
-        
-        def __len__(self):
-            return len(self.dataset)
-        
-        def __getitem__(self, idx):
-            return (self.dataset[idx],)  # Return as tuple to match TensorDataset
-    
     train_wrapped = TensorDatasetWrapper(train_dataset)
     val_wrapped = TensorDatasetWrapper(val_dataset)
     
@@ -237,26 +238,54 @@ def main():
     else:
         prefetch_factor = 2
     
-    # Create data loaders with optimized settings
-    train_dl = DataLoader(
+    # Create data loaders with optimized settings and Windows multiprocessing fallback
+    def create_dataloader(dataset, batch_size, shuffle, num_workers, pin_memory, persistent_workers, prefetch_factor, drop_last=False):
+        """Create DataLoader with fallback for multiprocessing issues."""
+        try:
+            return DataLoader(
+                dataset, 
+                batch_size=batch_size, 
+                shuffle=shuffle, 
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                persistent_workers=persistent_workers and num_workers > 0,
+                prefetch_factor=prefetch_factor,
+                drop_last=drop_last
+            )
+        except (AttributeError, RuntimeError) as e:
+            if "pickle" in str(e) or "multiprocessing" in str(e):
+                print(f"Warning: Multiprocessing failed ({e}), falling back to single-threaded loading")
+                return DataLoader(
+                    dataset, 
+                    batch_size=batch_size, 
+                    shuffle=shuffle, 
+                    num_workers=0,  # Disable multiprocessing
+                    pin_memory=pin_memory,
+                    persistent_workers=False,
+                    drop_last=drop_last
+                )
+            else:
+                raise
+    
+    train_dl = create_dataloader(
         train_wrapped, 
-        batch_size=args.batch, 
-        shuffle=True, 
-        num_workers=optimal_workers,
-        pin_memory=args.pin_memory and args.device == "cuda",
-        persistent_workers=args.persistent_workers and optimal_workers > 0,
-        prefetch_factor=prefetch_factor,
-        drop_last=True
+        args.batch, 
+        True, 
+        optimal_workers,
+        args.pin_memory and args.device == "cuda",
+        args.persistent_workers,
+        prefetch_factor,
+        True
     )
     
-    val_dl = DataLoader(
+    val_dl = create_dataloader(
         val_wrapped, 
-        batch_size=args.batch, 
-        shuffle=False, 
-        num_workers=optimal_workers,
-        pin_memory=args.pin_memory and args.device == "cuda",
-        persistent_workers=args.persistent_workers and optimal_workers > 0,
-        prefetch_factor=prefetch_factor
+        args.batch, 
+        False, 
+        optimal_workers,
+        args.pin_memory and args.device == "cuda",
+        args.persistent_workers,
+        prefetch_factor
     )
 
     # Get sample shape
