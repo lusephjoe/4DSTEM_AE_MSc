@@ -49,7 +49,13 @@ class LitAE(pl.LightningModule):
         return self.model(x)
 
     def training_step(self, batch, batch_idx):
+        if batch_idx == 0:
+            print(f"Starting training step {batch_idx}")
+        
         x, = batch  # Match original format - unpack tuple
+        
+        if batch_idx == 0:
+            print(f"Batch unpacked, shape: {x.shape}")
         
         # Use automatic mixed precision for faster training
         with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=self.device.type == 'cuda'):
@@ -247,6 +253,10 @@ def main():
         print("Windows detected: disabling multiprocessing due to HyperSpy compatibility issues")
         optimal_workers = 0
         prefetch_factor = 1
+        # On Windows, also disable persistent workers and pin memory to avoid hanging
+        args.persistent_workers = False
+        args.pin_memory = False
+        print("Additional Windows optimizations: disabled persistent workers and pin memory")
     elif total_size > 10000:  # For large datasets
         optimal_workers = min(optimal_workers, 2)
         prefetch_factor = 1
@@ -375,6 +385,24 @@ def main():
 
     # Training
     try:
+        print("Starting trainer.fit()...")
+        print("Testing train DataLoader before training...")
+        try:
+            first_batch = next(iter(train_dl))
+            print(f"✓ Train DataLoader working, first batch shape: {first_batch[0].shape}")
+        except Exception as e:
+            print(f"✗ Train DataLoader failed: {e}")
+            raise
+        
+        print("Testing val DataLoader before training...")
+        try:
+            first_val_batch = next(iter(val_dl))
+            print(f"✓ Val DataLoader working, first batch shape: {first_val_batch[0].shape}")
+        except Exception as e:
+            print(f"✗ Val DataLoader failed: {e}")
+            raise
+        
+        print("Both DataLoaders working, starting training...")
         trainer.fit(model, train_dl, val_dl)
     except KeyboardInterrupt:
         print("Training interrupted by user")
