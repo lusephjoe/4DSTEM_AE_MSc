@@ -307,6 +307,15 @@ class ChunkedHyperSpyDataset(Dataset):
         self.max_cache_size = self._calculate_optimal_cache_size()
         
         print(f"✓ Chunked dataset initialized with cache size: {self.max_cache_size} chunks (chunk_size: {self.chunk_size})")
+        
+        # Test loading the first chunk to catch issues early
+        print("Testing first chunk loading...")
+        try:
+            test_sample = self[0]
+            print(f"✓ First chunk test successful, sample shape: {test_sample.shape}")
+        except Exception as e:
+            print(f"Warning: First chunk test failed: {e}")
+            print("Dataset may still work but could hang during training.")
     
     def _calculate_optimal_cache_size(self) -> int:
         """Calculate optimal cache size based on available memory and dataset size."""

@@ -142,7 +142,8 @@ def main():
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--gpus", type=int, default=1)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--summary", type=bool, default=True)
+    p.add_argument("--summary", action="store_true", default=True, help="Generate model summary")
+    p.add_argument("--no_summary", action="store_true", help="Skip model summary generation")
     p.add_argument("--realtime_metrics", action="store_true", help="Enable real-time metrics")
     p.add_argument("--lambda_act", type=float, default=1e-5, help="L1 regularization coefficient")
     p.add_argument("--lambda_sim", type=float, default=0, help="Contrastive similarity regularization")
@@ -225,6 +226,15 @@ def main():
     
     print(f"Dataset split: {train_size} train, {val_size} validation")
     
+    # Test dataset loading to catch issues early
+    print("Testing dataset loading...")
+    try:
+        test_sample = dataset[0]
+        print(f"✓ Dataset test successful, sample shape: {test_sample.shape}")
+    except Exception as e:
+        print(f"Warning: Dataset test failed: {e}")
+        print("This may cause hanging during training. Consider using --no_summary flag.")
+    
     # Create data loaders with wrapper to match original format
     train_wrapped = TensorDatasetWrapper(train_dataset)
     val_wrapped = TensorDatasetWrapper(val_dataset)
@@ -288,14 +298,25 @@ def main():
                   args.lambda_act, args.lambda_sim, args.lambda_div,
                   (detected_size, detected_size), args.compile)
     
-    if args.summary:
-        # Create sample for model summary
-        sample = next(iter(train_dl))
-        if isinstance(sample, (list, tuple)):
-            sample = sample[0]
-        example = sample[:1].to(args.device)
-        model = model.to(args.device)
-        show(model, example_input=example, output_dir=args.output_dir, include_evaluation=False)
+    if args.summary and not args.no_summary:
+        # Create sample for model summary with fallback for hanging issues
+        try:
+            print("Attempting to get first sample for model summary...")
+            sample = next(iter(train_dl))
+            if isinstance(sample, (list, tuple)):
+                sample = sample[0]
+            example = sample[:1].to(args.device)
+            model = model.to(args.device)
+            show(model, example_input=example, output_dir=args.output_dir, include_evaluation=False)
+            
+        except Exception as e:
+            print(f"Warning: Could not create model summary due to data loading issue: {e}")
+            print("Skipping model summary and proceeding with training...")
+            # Get shape from dataset directly instead
+            sample_shape = dataset.get_shape()
+            example = torch.randn(1, *sample_shape).to(args.device)
+            model = model.to(args.device)
+            print(f"Using synthetic example with shape {example.shape} for model initialization")
 
     # Setup logging
     tb_logger = TensorBoardLogger(
