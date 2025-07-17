@@ -308,6 +308,10 @@ class ChunkedHyperSpyDataset(Dataset):
         # Adaptive cache size based on available memory
         self.max_cache_size = self._calculate_optimal_cache_size()
         
+        # Add a simple lock to prevent concurrent access issues
+        import threading
+        self._lock = threading.Lock()
+        
         print(f"✓ Chunked dataset initialized with cache size: {self.max_cache_size} chunks (chunk_size: {self.chunk_size})")
         
         # Test loading the first chunk to catch issues early
@@ -476,59 +480,61 @@ class ChunkedHyperSpyDataset(Dataset):
         if self.debug and idx < 5:
             print(f"Chunk key for idx {idx}: {chunk_key}")
         
-        # Check if chunk is in cache
-        if chunk_key not in self.cache:
-            # Load chunk with memory management
-            try:
-                chunk_data = self._load_chunk(chunk_key)
-                
-                # Manage cache size with LRU eviction and aggressive cleanup
-                while len(self.cache) >= self.max_cache_size:
-                    # Remove oldest chunk
-                    oldest_key = self.cache_keys.pop(0)
-                    if oldest_key in self.cache:
-                        # Clear chunk data with safe cleanup
-                        chunk_to_delete = self.cache[oldest_key]
-                        if isinstance(chunk_to_delete, dict):
-                            for k, v in chunk_to_delete.items():
-                                # Safer cleanup - just delete references
-                                if hasattr(v, 'data'):
-                                    try:
-                                        del v.data
-                                    except:
-                                        pass
-                        del self.cache[oldest_key]
-                        del chunk_to_delete
-                        
-                        # Force garbage collection for large datasets
-                        import gc
-                        gc.collect()
-                        
-                        # Additional CUDA memory cleanup if available
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                
-                # Add to cache
-                self.cache[chunk_key] = chunk_data
-                self.cache_keys.append(chunk_key)
-                
-            except Exception as e:
-                print(f"Warning: Failed to load chunk {chunk_key}: {e}")
-                # Return fallback pattern
+        # Use lock to prevent concurrent access issues
+        with self._lock:
+            # Check if chunk is in cache
+            if chunk_key not in self.cache:
+                # Load chunk with memory management
+                try:
+                    chunk_data = self._load_chunk(chunk_key)
+                    
+                    # Manage cache size with LRU eviction and aggressive cleanup
+                    while len(self.cache) >= self.max_cache_size:
+                        # Remove oldest chunk
+                        oldest_key = self.cache_keys.pop(0)
+                        if oldest_key in self.cache:
+                            # Clear chunk data with safe cleanup
+                            chunk_to_delete = self.cache[oldest_key]
+                            if isinstance(chunk_to_delete, dict):
+                                for k, v in chunk_to_delete.items():
+                                    # Safer cleanup - just delete references
+                                    if hasattr(v, 'data'):
+                                        try:
+                                            del v.data
+                                        except:
+                                            pass
+                            del self.cache[oldest_key]
+                            del chunk_to_delete
+                            
+                            # Force garbage collection for large datasets
+                            import gc
+                            gc.collect()
+                            
+                            # Additional CUDA memory cleanup if available
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                    
+                    # Add to cache
+                    self.cache[chunk_key] = chunk_data
+                    self.cache_keys.append(chunk_key)
+                    
+                except Exception as e:
+                    print(f"Warning: Failed to load chunk {chunk_key}: {e}")
+                    # Return fallback pattern
+                    return self._get_fallback_pattern()
+            
+            # Update cache access order (move to end) - optimized
+            if chunk_key in self.cache_keys:
+                # More efficient than remove + append for large lists
+                idx_pos = self.cache_keys.index(chunk_key)
+                self.cache_keys.append(self.cache_keys.pop(idx_pos))
+            
+            # Return pattern from cache
+            if idx in self.cache[chunk_key]:
+                return self.cache[chunk_key][idx]
+            else:
+                # Fallback if pattern not in chunk
                 return self._get_fallback_pattern()
-        
-        # Update cache access order (move to end) - optimized
-        if chunk_key in self.cache_keys:
-            # More efficient than remove + append for large lists
-            idx_pos = self.cache_keys.index(chunk_key)
-            self.cache_keys.append(self.cache_keys.pop(idx_pos))
-        
-        # Return pattern from cache
-        if idx in self.cache[chunk_key]:
-            return self.cache[chunk_key][idx]
-        else:
-            # Fallback if pattern not in chunk
-            return self._get_fallback_pattern()
     
     def _get_fallback_pattern(self) -> torch.Tensor:
         """Generate a fallback pattern in case of loading errors."""

@@ -410,6 +410,17 @@ def main():
             raise
         
         # Try with a smaller batch size first
+        print("Trying with batch size 1...")
+        from torch.utils.data import DataLoader
+        test_dl = DataLoader(train_wrapped, batch_size=1, shuffle=False, num_workers=0)
+        try:
+            first_single = next(iter(test_dl))
+            print(f"✓ Batch size 1 works, shape: {first_single[0].shape}")
+        except Exception as e:
+            print(f"✗ Even batch size 1 failed: {e}")
+            raise
+        
+        # If batch size 1 works, try with the original batch size
         print(f"Testing DataLoader with batch size {args.batch}...")
         print("Creating iterator...")
         train_iter = iter(train_dl)
@@ -418,18 +429,32 @@ def main():
             first_batch = next(train_iter)
             print(f"✓ Train DataLoader working, first batch shape: {first_batch[0].shape}")
         except Exception as e:
-            print(f"✗ Train DataLoader failed: {e}")
-            print("Trying with batch size 1...")
-            # Try with batch size 1
-            from torch.utils.data import DataLoader
-            test_dl = DataLoader(train_wrapped, batch_size=1, shuffle=False, num_workers=0)
-            try:
-                first_single = next(iter(test_dl))
-                print(f"✓ Batch size 1 works, shape: {first_single[0].shape}")
-                print("Issue is likely with larger batch sizes")
-            except Exception as e2:
-                print(f"✗ Even batch size 1 failed: {e2}")
-            raise
+            print(f"✗ Train DataLoader failed with batch size {args.batch}: {e}")
+            print("Reducing batch size to 16 for Windows compatibility...")
+            # Create new DataLoader with smaller batch size
+            args.batch = 16
+            train_dl = create_dataloader(
+                train_wrapped, 
+                args.batch, 
+                True, 
+                optimal_workers,
+                args.pin_memory and args.device == "cuda",
+                args.persistent_workers,
+                prefetch_factor,
+                True
+            )
+            val_dl = create_dataloader(
+                val_wrapped, 
+                args.batch, 
+                False, 
+                optimal_workers,
+                args.pin_memory and args.device == "cuda",
+                args.persistent_workers,
+                prefetch_factor
+            )
+            # Test again with smaller batch
+            first_batch = next(iter(train_dl))
+            print(f"✓ Reduced batch size works, shape: {first_batch[0].shape}")
         
         print("Testing validation DataLoader...")
         try:
