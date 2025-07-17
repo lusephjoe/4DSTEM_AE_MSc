@@ -398,25 +398,25 @@ def main():
 
     # Training
     try:
-        if args.debug:
-            print("Starting trainer.fit()...")
-            print("Testing train DataLoader before training...")
-            try:
-                first_batch = next(iter(train_dl))
+        # Always warm up the DataLoaders to prevent hanging (especially on Windows)
+        print("Warming up DataLoaders...")
+        try:
+            first_batch = next(iter(train_dl))
+            if args.debug:
                 print(f"✓ Train DataLoader working, first batch shape: {first_batch[0].shape}")
-            except Exception as e:
-                print(f"✗ Train DataLoader failed: {e}")
-                raise
-            
-            print("Testing val DataLoader before training...")
-            try:
-                first_val_batch = next(iter(val_dl))
+        except Exception as e:
+            print(f"✗ Train DataLoader failed: {e}")
+            raise
+        
+        try:
+            first_val_batch = next(iter(val_dl))
+            if args.debug:
                 print(f"✓ Val DataLoader working, first batch shape: {first_val_batch[0].shape}")
-            except Exception as e:
-                print(f"✗ Val DataLoader failed: {e}")
-                raise
-            
-            print("Both DataLoaders working, starting training...")
+        except Exception as e:
+            print(f"✗ Val DataLoader failed: {e}")
+            raise
+        
+        print("✓ DataLoaders warmed up successfully")
         
         trainer.fit(model, train_dl, val_dl)
     except KeyboardInterrupt:
