@@ -7,9 +7,11 @@ try:
 except ImportError:
     HAS_HYPERSPY = False
 from scipy.ndimage import gaussian_filter
+from tqdm import tqdm
 
 def normalise(x: np.ndarray) -> np.ndarray:
     """Z-score normalization with log scaling like m3_learning"""
+    print("Normalizing data...")
     x = x.astype("float32")
     x = np.log(x + 1)  # Log scaling with +1 to avoid log(0) like m3_learning
     # Apply z-score normalization (mean=0, std=1)
@@ -48,6 +50,7 @@ def downsample_patterns(data: np.ndarray, k: int, mode: str, sigma: float) -> np
     """Apply downsampling to diffraction patterns."""
     if k <= 1:
         return data
+    print(f"Downsampling patterns using {mode} method...")
     if mode == "stride":
         return data[..., ::k, ::k]
     if mode == "bin":
@@ -73,6 +76,7 @@ def detect_file_type(file_path: Path) -> str:
 def load_data(file_path: Path) -> np.ndarray:
     """Load data based on file type."""
     file_type = detect_file_type(file_path)
+    print(f"Loading {file_type} file: {file_path}")
     
     if file_type == "hdf5":
         with h5py.File(file_path, "r") as f:
@@ -99,6 +103,8 @@ def main():
                    help="Gaussian sigma (pixels) if --mode gauss (default 0.8)")
     p.add_argument("--scan_step", type=int, default=1, metavar="n",
                    help="Take every n-th probe position along both scan axes")
+    p.add_argument("--dtype", choices=["float32", "float16"], default="float16",
+                   help="Tensor data type: float32 (full precision) or float16 (half precision, smaller files)")
     args = p.parse_args()
 
     # Load data with automatic file type detection
@@ -107,6 +113,7 @@ def main():
 
     # Optional scan grid thinning
     if args.scan_step > 1:
+        print(f"Subsampling scan grid by factor {args.scan_step}...")
         data = data[::args.scan_step, ::args.scan_step, ...]
         print(f"Scan grid subsampled by {args.scan_step} → new grid {data.shape[:2]}")
 
@@ -118,11 +125,22 @@ def main():
     data = normalise(data)
 
     # Reshape to samples × 1 × Qy × Qx
+    print("Reshaping data for PyTorch...")
     ny, nx, qy, qx = data.shape
     data = data.reshape(ny*nx, 1, qy, qx)
 
-    torch.save(torch.from_numpy(data), args.output)
-    print(f"Saved {data.shape[0]} patterns of size {qy}*{qx} → {args.output}")
+    # Save with optimized tensor format
+    print(f"Saving {data.shape[0]} patterns of size {qy}*{qx}...")
+    
+    # Convert to torch tensor with specified precision
+    tensor_data = torch.from_numpy(data)
+    if args.dtype == "float16":
+        tensor_data = tensor_data.half()  # float16 reduces size by ~50%
+    
+    torch.save(tensor_data, args.output)
+    
+    file_size_mb = args.output.stat().st_size / (1024 * 1024)
+    print(f"Saved tensor to {args.output} (dtype: {args.dtype}, size: {file_size_mb:.1f} MB)")
 
 if __name__ == "__main__":
     main()

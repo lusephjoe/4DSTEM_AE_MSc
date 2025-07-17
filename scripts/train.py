@@ -4,6 +4,8 @@ from pytorch_lightning.loggers import TensorBoardLogger
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, TensorDataset
 from pathlib import Path
+import sys
+sys.path.append(str(Path(__file__).parent.parent))
 from models.autoencoder import Autoencoder
 from models.summary import show, calculate_metrics
 
@@ -94,6 +96,12 @@ def main():
     p.add_argument("--lambda_sim", type=float, default=0, help="Contrastive similarity regularization coefficient")
     p.add_argument("--lambda_div", type=float, default=0, help="Activation divergence regularization coefficient")
     p.add_argument("--input_size", type=int, default=256, help="Input image size (assumes square images)")
+    p.add_argument("--precision", choices=["32", "16", "bf16"], default="16", help="Training precision (32=float32, 16=float16, bf16=bfloat16)")
+    p.add_argument("--compile", action="store_true", help="Use torch.compile for faster training (PyTorch 2.0+)")
+    p.add_argument("--num_workers", type=int, default=4, help="Number of data loading workers")
+    p.add_argument("--pin_memory", action="store_true", default=True, help="Pin memory for faster GPU transfer")
+    p.add_argument("--persistent_workers", action="store_true", help="Keep workers alive between epochs")
+    p.add_argument("--profile", action="store_true", help="Enable PyTorch profiler for performance analysis")
 
     args = p.parse_args()
 
@@ -227,8 +235,19 @@ def main():
         final_comparison_path = args.output_dir / "final_reconstruction_comparison.png"
         save_comparison_images(val_input, val_output, final_comparison_path, num_samples=8)
         print(f"Final comparison saved to {final_comparison_path}")
+        
+        # Print CUDA memory usage stats
+        if args.device == "cuda":
+            print(f"\nCUDA Memory Usage:")
+            print(f"  Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+            print(f"  Cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+            print(f"  Max allocated: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
     
     print("="*80)
+    
+    # Final cleanup
+    if args.device == "cuda":
+        torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     main()
