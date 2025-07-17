@@ -398,20 +398,42 @@ def main():
 
     # Training
     try:
-        # Always warm up the DataLoaders to prevent hanging (especially on Windows)
-        print("Warming up DataLoaders...")
+        # Test individual dataset access vs DataLoader batching
+        print("Testing individual dataset access...")
         try:
-            first_batch = next(iter(train_dl))
-            if args.debug:
-                print(f"✓ Train DataLoader working, first batch shape: {first_batch[0].shape}")
+            # Test individual pattern access
+            test_pattern = train_wrapped[0]
+            print(f"✓ Individual pattern access works, shape: {test_pattern[0].shape}")
         except Exception as e:
-            print(f"✗ Train DataLoader failed: {e}")
+            print(f"✗ Individual pattern access failed: {e}")
             raise
         
+        # Try with a smaller batch size first
+        print(f"Testing DataLoader with batch size {args.batch}...")
+        print("Creating iterator...")
+        train_iter = iter(train_dl)
+        print("Getting first batch...")
+        try:
+            first_batch = next(train_iter)
+            print(f"✓ Train DataLoader working, first batch shape: {first_batch[0].shape}")
+        except Exception as e:
+            print(f"✗ Train DataLoader failed: {e}")
+            print("Trying with batch size 1...")
+            # Try with batch size 1
+            from torch.utils.data import DataLoader
+            test_dl = DataLoader(train_wrapped, batch_size=1, shuffle=False, num_workers=0)
+            try:
+                first_single = next(iter(test_dl))
+                print(f"✓ Batch size 1 works, shape: {first_single[0].shape}")
+                print("Issue is likely with larger batch sizes")
+            except Exception as e2:
+                print(f"✗ Even batch size 1 failed: {e2}")
+            raise
+        
+        print("Testing validation DataLoader...")
         try:
             first_val_batch = next(iter(val_dl))
-            if args.debug:
-                print(f"✓ Val DataLoader working, first batch shape: {first_val_batch[0].shape}")
+            print(f"✓ Val DataLoader working, first batch shape: {first_val_batch[0].shape}")
         except Exception as e:
             print(f"✗ Val DataLoader failed: {e}")
             raise
