@@ -273,7 +273,8 @@ class ChunkedHyperSpyDataset(Dataset):
                  downsample_mode: str = "bin",
                  sigma: float = 0.8,
                  normalize: bool = True,
-                 dtype: torch.dtype = torch.float32):
+                 dtype: torch.dtype = torch.float32,
+                 debug: bool = False):
         """
         Initialize chunked HyperSpy dataset with optimized caching.
         
@@ -287,6 +288,7 @@ class ChunkedHyperSpyDataset(Dataset):
             normalize: Whether to apply log normalization
             dtype: Output tensor dtype
         """
+        self.debug = debug
         self.base_dataset = HyperSpyDataset(
             file_path, scan_step, downsample, downsample_mode, 
             sigma, normalize, dtype
@@ -367,9 +369,13 @@ class ChunkedHyperSpyDataset(Dataset):
     
     def _load_chunk(self, chunk_key: int) -> dict:
         """Load a chunk of data with efficient batch processing."""
+        if self.debug:
+            print(f"Loading chunk {chunk_key}...")
         start_idx = chunk_key * self.chunk_size
         end_idx = min(start_idx + self.chunk_size, len(self.base_dataset))
         
+        if self.debug:
+            print(f"Chunk {chunk_key}: loading indices {start_idx} to {end_idx}")
         chunk_data = {}
         
         # Try to batch load patterns for efficiency
@@ -462,7 +468,13 @@ class ChunkedHyperSpyDataset(Dataset):
     
     def __getitem__(self, idx: int) -> torch.Tensor:
         """Get item with optimized caching and error handling."""
+        if self.debug and idx < 5:  # Debug first few items
+            print(f"ChunkedHyperSpyDataset.__getitem__({idx}) called")
+        
         chunk_key = self._get_chunk_key(idx)
+        
+        if self.debug and idx < 5:
+            print(f"Chunk key for idx {idx}: {chunk_key}")
         
         # Check if chunk is in cache
         if chunk_key not in self.cache:

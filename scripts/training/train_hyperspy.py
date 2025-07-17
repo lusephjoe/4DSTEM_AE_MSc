@@ -22,7 +22,15 @@ class TensorDatasetWrapper:
         return len(self.dataset)
     
     def __getitem__(self, idx):
-        return (self.dataset[idx],)  # Return as tuple to match TensorDataset
+        try:
+            if hasattr(self, 'debug') and self.debug and idx < 5:  # Debug first few items
+                print(f"TensorDatasetWrapper accessing index {idx}")
+            result = self.dataset[idx]
+            return (result,)  # Return as tuple to match TensorDataset
+        except Exception as e:
+            if hasattr(self, 'debug') and self.debug:
+                print(f"Error in TensorDatasetWrapper.__getitem__({idx}): {e}")
+            raise
 
 class LitAE(pl.LightningModule):
     def __init__(self, latent_dim: int, lr: float, realtime_metrics: bool = False, 
@@ -49,12 +57,12 @@ class LitAE(pl.LightningModule):
         return self.model(x)
 
     def training_step(self, batch, batch_idx):
-        if batch_idx == 0:
+        if hasattr(self, 'debug') and self.debug and batch_idx == 0:
             print(f"Starting training step {batch_idx}")
         
         x, = batch  # Match original format - unpack tuple
         
-        if batch_idx == 0:
+        if hasattr(self, 'debug') and self.debug and batch_idx == 0:
             print(f"Batch unpacked, shape: {x.shape}")
         
         # Use automatic mixed precision for faster training
@@ -169,6 +177,7 @@ def main():
     p.add_argument("--num_workers", type=int, default=4, help="Number of data loading workers")  # Match original
     p.add_argument("--pin_memory", action="store_true", default=True)
     p.add_argument("--persistent_workers", action="store_true")
+    p.add_argument("--debug", action="store_true", help="Enable debug output for troubleshooting")
     
     args = p.parse_args()
 
@@ -212,6 +221,7 @@ def main():
     
     if args.use_chunked:
         dataset_kwargs['chunk_size'] = args.chunk_size
+        dataset_kwargs['debug'] = args.debug
     
     dataset = dataset_class(**dataset_kwargs)
     
@@ -242,7 +252,9 @@ def main():
     
     # Create data loaders with wrapper to match original format
     train_wrapped = TensorDatasetWrapper(train_dataset)
+    train_wrapped.debug = args.debug
     val_wrapped = TensorDatasetWrapper(val_dataset)
+    val_wrapped.debug = args.debug
     
     # Optimize data loader settings for large datasets
     optimal_workers = min(args.num_workers, 4)  # Limit workers to prevent memory issues
@@ -306,6 +318,7 @@ def main():
     model = LitAE(args.latent, args.lr, args.realtime_metrics, 
                   args.lambda_act, args.lambda_sim, args.lambda_div,
                   (detected_size, detected_size), args.compile)
+    model.debug = args.debug
     
     if args.summary and not args.no_summary:
         # Create sample for model summary with fallback for hanging issues
@@ -385,24 +398,26 @@ def main():
 
     # Training
     try:
-        print("Starting trainer.fit()...")
-        print("Testing train DataLoader before training...")
-        try:
-            first_batch = next(iter(train_dl))
-            print(f"✓ Train DataLoader working, first batch shape: {first_batch[0].shape}")
-        except Exception as e:
-            print(f"✗ Train DataLoader failed: {e}")
-            raise
+        if args.debug:
+            print("Starting trainer.fit()...")
+            print("Testing train DataLoader before training...")
+            try:
+                first_batch = next(iter(train_dl))
+                print(f"✓ Train DataLoader working, first batch shape: {first_batch[0].shape}")
+            except Exception as e:
+                print(f"✗ Train DataLoader failed: {e}")
+                raise
+            
+            print("Testing val DataLoader before training...")
+            try:
+                first_val_batch = next(iter(val_dl))
+                print(f"✓ Val DataLoader working, first batch shape: {first_val_batch[0].shape}")
+            except Exception as e:
+                print(f"✗ Val DataLoader failed: {e}")
+                raise
+            
+            print("Both DataLoaders working, starting training...")
         
-        print("Testing val DataLoader before training...")
-        try:
-            first_val_batch = next(iter(val_dl))
-            print(f"✓ Val DataLoader working, first batch shape: {first_val_batch[0].shape}")
-        except Exception as e:
-            print(f"✗ Val DataLoader failed: {e}")
-            raise
-        
-        print("Both DataLoaders working, starting training...")
         trainer.fit(model, train_dl, val_dl)
     except KeyboardInterrupt:
         print("Training interrupted by user")
