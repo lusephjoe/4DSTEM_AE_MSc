@@ -362,6 +362,7 @@ def main():
         'devices': devices,
         'logger': tb_logger,
         'enable_progress_bar': True,
+        'num_sanity_val_steps': 0,  # Disable sanity check that can hang with HyperSpy
     }
     
     # Add callbacks and precision only if they exist
