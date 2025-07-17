@@ -231,41 +231,33 @@ def main():
     
     # Optimize data loader settings for large datasets
     optimal_workers = min(args.num_workers, 4)  # Limit workers to prevent memory issues
-    if total_size > 10000:  # For large datasets
+    
+    # Disable multiprocessing on Windows due to HyperSpy pickle issues
+    import platform
+    if platform.system() == "Windows":
+        print("Windows detected: disabling multiprocessing due to HyperSpy compatibility issues")
+        optimal_workers = 0
+        prefetch_factor = 1
+    elif total_size > 10000:  # For large datasets
         optimal_workers = min(optimal_workers, 2)
         prefetch_factor = 1
         print(f"Large dataset detected ({total_size} samples), using {optimal_workers} workers")
     else:
         prefetch_factor = 2
     
-    # Create data loaders with optimized settings and Windows multiprocessing fallback
+    # Create data loaders with optimized settings
     def create_dataloader(dataset, batch_size, shuffle, num_workers, pin_memory, persistent_workers, prefetch_factor, drop_last=False):
-        """Create DataLoader with fallback for multiprocessing issues."""
-        try:
-            return DataLoader(
-                dataset, 
-                batch_size=batch_size, 
-                shuffle=shuffle, 
-                num_workers=num_workers,
-                pin_memory=pin_memory,
-                persistent_workers=persistent_workers and num_workers > 0,
-                prefetch_factor=prefetch_factor,
-                drop_last=drop_last
-            )
-        except (AttributeError, RuntimeError) as e:
-            if "pickle" in str(e) or "multiprocessing" in str(e):
-                print(f"Warning: Multiprocessing failed ({e}), falling back to single-threaded loading")
-                return DataLoader(
-                    dataset, 
-                    batch_size=batch_size, 
-                    shuffle=shuffle, 
-                    num_workers=0,  # Disable multiprocessing
-                    pin_memory=pin_memory,
-                    persistent_workers=False,
-                    drop_last=drop_last
-                )
-            else:
-                raise
+        """Create DataLoader with proper settings."""
+        return DataLoader(
+            dataset, 
+            batch_size=batch_size, 
+            shuffle=shuffle, 
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers and num_workers > 0,
+            prefetch_factor=prefetch_factor if num_workers > 0 else None,
+            drop_last=drop_last
+        )
     
     train_dl = create_dataloader(
         train_wrapped, 
