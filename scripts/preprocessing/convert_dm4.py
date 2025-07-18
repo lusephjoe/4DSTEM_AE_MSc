@@ -24,6 +24,7 @@ import numpy as np
 import torch
 import hyperspy.api as hs  # pip install hyperspy
 from scipy.ndimage import gaussian_filter
+import gc
 
 # ─────────────────────────── helpers ────────────────────────────
 
@@ -104,6 +105,9 @@ def process_chunk_worker(args_tuple):
         chunk_rows, chunk_cols, qy_processed, qx_processed = chunk_data.shape
         chunk_data = chunk_data.reshape(chunk_rows * chunk_cols, qy_processed, qx_processed)
         
+        # Force garbage collection to free memory
+        gc.collect()
+        
         return chunk_data
         
     except Exception as e:
@@ -171,84 +175,78 @@ def main():
     print(f"Final pattern size: {qy_final}x{qx_final}")
     print(f"Estimated memory needed: {estimated_memory_gb:.2f} GB")
     
-    if estimated_memory_gb > args.max_memory_gb:
-        print(f"Large file detected ({estimated_memory_gb:.2f} GB > {args.max_memory_gb:.2f} GB)")
-        print("For large files, consider using --downsample or --scan_step to reduce size")
-        print("Processing with multiprocessing chunking...")
-        
-        # Calculate chunk size based on number of workers and memory
-        patterns_per_row = nx
-        rows_per_worker = max(1, int(args.max_memory_gb * 1024 / (patterns_per_row * pattern_size_mb * args.num_workers)))
-        rows_per_worker = min(rows_per_worker, ny)
-        
-        print(f"Processing {rows_per_worker} rows per worker...")
-        
-        # Create work chunks
-        work_chunks = []
-        for row_start in range(0, ny, rows_per_worker):
-            row_end = min(row_start + rows_per_worker, ny)
-            work_chunks.append((
-                args.input,
-                row_start, 
-                row_end,
-                args.scan_step,
-                args.downsample,
-                args.mode,
-                args.sigma
-            ))
-        
-        print(f"Created {len(work_chunks)} work chunks")
-        
-        # Process chunks in parallel
-        all_tensors = []
-        
-        if args.num_workers == 1:
-            # Single-threaded processing
-            for i, chunk_args in enumerate(work_chunks):
-                print(f"Processing chunk {i+1}/{len(work_chunks)} (rows {chunk_args[1]}-{chunk_args[2]-1})...")
-                chunk_data = process_chunk_worker(chunk_args)
+    # Always use chunked processing for large files to avoid memory issues
+    print(f"Large file detected ({estimated_memory_gb:.2f} GB estimated memory)")
+    print("Processing with chunked approach to stay within memory limits...")
+    
+    # Calculate chunk size based on available memory
+    # Use conservative estimate: process chunks that fit in available memory
+    memory_safety_factor = 0.6  # Use 60% of available memory as safety margin
+    available_memory_gb = args.max_memory_gb * memory_safety_factor
+    
+    patterns_per_row = nx
+    # Account for processing overhead (normalization, downsampling need extra memory)
+    processing_overhead = 3.0  # 3x memory overhead for processing
+    effective_pattern_size_mb = pattern_size_mb * processing_overhead
+    
+    rows_per_worker = max(1, int(available_memory_gb * 1024 / (patterns_per_row * effective_pattern_size_mb * args.num_workers)))
+    rows_per_worker = min(rows_per_worker, ny)
+    
+    # Ensure we don't create chunks that are too small (minimum 1 row)
+    if rows_per_worker < 1:
+        rows_per_worker = 1
+        print(f"WARNING: Chunk size is very small. Consider increasing --max_memory_gb or using --downsample")
+    
+    print(f"Processing {rows_per_worker} rows per worker (using {available_memory_gb:.1f} GB safely)...")
+    
+    # Create work chunks
+    work_chunks = []
+    for row_start in range(0, ny, rows_per_worker):
+        row_end = min(row_start + rows_per_worker, ny)
+        work_chunks.append((
+            args.input,
+            row_start, 
+            row_end,
+            args.scan_step,
+            args.downsample,
+            args.mode,
+            args.sigma
+        ))
+    
+    print(f"Created {len(work_chunks)} work chunks")
+    
+    # Process chunks in parallel
+    all_tensors = []
+    
+    if args.num_workers == 1:
+        # Single-threaded processing
+        for i, chunk_args in enumerate(work_chunks):
+            print(f"Processing chunk {i+1}/{len(work_chunks)} (rows {chunk_args[1]}-{chunk_args[2]-1})...")
+            chunk_data = process_chunk_worker(chunk_args)
+            if chunk_data is not None:
+                chunk_tensor = torch.from_numpy(chunk_data).unsqueeze(1)
+                all_tensors.append(chunk_tensor)
+                del chunk_data, chunk_tensor
+                gc.collect()  # Force garbage collection after each chunk
+    else:
+        # Multi-threaded processing
+        with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
+            print("Starting parallel processing...")
+            futures = [executor.submit(process_chunk_worker, chunk_args) for chunk_args in work_chunks]
+            
+            for i, future in enumerate(futures):
+                print(f"Collecting result {i+1}/{len(futures)}...")
+                chunk_data = future.result()
                 if chunk_data is not None:
                     chunk_tensor = torch.from_numpy(chunk_data).unsqueeze(1)
                     all_tensors.append(chunk_tensor)
                     del chunk_data, chunk_tensor
-        else:
-            # Multi-threaded processing
-            with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
-                print("Starting parallel processing...")
-                futures = [executor.submit(process_chunk_worker, chunk_args) for chunk_args in work_chunks]
-                
-                for i, future in enumerate(futures):
-                    print(f"Collecting result {i+1}/{len(futures)}...")
-                    chunk_data = future.result()
-                    if chunk_data is not None:
-                        chunk_tensor = torch.from_numpy(chunk_data).unsqueeze(1)
-                        all_tensors.append(chunk_tensor)
-                        del chunk_data, chunk_tensor
-        
-        # Concatenate all chunks
-        print("Concatenating all chunks...")
-        tensor = torch.cat(all_tensors, dim=0)
-        del all_tensors
-        
-    else:
-        # Small enough to process all at once (original behavior)
-        print("Processing all data at once...")
-        data = sig.data.compute()
-        
-        # Apply scan step
-        if args.scan_step > 1:
-            data = data[::args.scan_step, ::args.scan_step, ...]
-            print(f"Scan grid subsampled by {args.scan_step} → new grid {data.shape[:2]}")
-        
-        # Apply downsampling
-        data = downsample_patterns(data, args.downsample, args.mode, args.sigma)
-        
-        # Apply normalization
-        data = normalise(data)
-        
-        # Convert to tensor
-        ny, nx, qy, qx = data.shape
-        tensor = torch.from_numpy(data.reshape(ny * nx, 1, qy, qx))
+                    gc.collect()  # Force garbage collection after each chunk
+    
+    # Concatenate all chunks
+    print("Concatenating all chunks...")
+    tensor = torch.cat(all_tensors, dim=0)
+    del all_tensors
     
     print(f"Final tensor shape: {tensor.shape}")
     print(f"Memory usage: {tensor.element_size() * tensor.nelement() / 1024**3:.2f} GB")
