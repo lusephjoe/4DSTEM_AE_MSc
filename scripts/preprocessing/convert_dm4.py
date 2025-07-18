@@ -171,11 +171,23 @@ def main():
     if args.scan_step > 1:
         raw_data = raw_data[::args.scan_step, ::args.scan_step]
     
-    # Rechunk the existing dask array to our desired chunk size
-    dask_data = da.rechunk(raw_data, chunks=(args.chunk_size, args.chunk_size, qy, qx))
+    # Rechunk the existing dask array to smaller chunks to avoid 2GB limit
+    # Calculate chunk size to stay under 2GB for float16 data
+    max_chunk_size_gb = 1.5  # Use 1.5GB as safety margin
+    bytes_per_pattern = qy * qx * 2  # float16 = 2 bytes
+    max_patterns_per_chunk = int(max_chunk_size_gb * 1024**3 / bytes_per_pattern)
+    safe_chunk_size = min(args.chunk_size, max_patterns_per_chunk)
+    
+    print(f"Using chunk size: {safe_chunk_size} patterns (max {max_patterns_per_chunk} for 2GB limit)")
+    
+    # Rechunk to smaller chunks
+    dask_data = da.rechunk(raw_data, chunks=(safe_chunk_size, safe_chunk_size, qy, qx))
     
     # Reshape to (patterns, height, width) format
     dask_data = dask_data.reshape(total_patterns, qy, qx)
+    
+    # Rechunk again after reshape to ensure proper chunking
+    dask_data = da.rechunk(dask_data, chunks=(safe_chunk_size, qy, qx))
     
     # Apply downsampling if needed
     if args.downsample > 1:
@@ -184,11 +196,14 @@ def main():
         def downsample_chunk(chunk):
             return downsample_patterns(chunk, args.downsample, args.mode, args.sigma)
         
+        # Calculate new chunk size after downsampling
+        new_safe_chunk_size = safe_chunk_size  # Keep same number of patterns
+        
         dask_data = dask_data.map_blocks(downsample_chunk, 
                                         dtype=dask_data.dtype,
                                         drop_axis=None,
                                         new_axis=None,
-                                        chunks=(args.chunk_size, qy_final, qx_final))
+                                        chunks=(new_safe_chunk_size, qy_final, qx_final))
     
     # Calculate min/max for metadata
     print("Computing data range for metadata...")
