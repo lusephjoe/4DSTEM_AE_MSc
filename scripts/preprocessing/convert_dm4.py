@@ -220,13 +220,10 @@ def main():
     print(f"Saving to zarr format: {args.output}")
     print(f"Compression: Blosc-zstd level {args.compression_level} with bit-shuffle")
     
-    # Use zarr chunks that match dask chunks
-    zarr_chunks = (args.chunk_size, qy_final, qx_final)
-    
+    # Save to zarr - let dask handle chunking automatically
     da.to_zarr(processed_data, args.output, 
                compressor=compressor, 
-               overwrite=True,
-               chunks=zarr_chunks)
+               overwrite=True)
     
     # Save metadata for reconstruction
     metadata = {
