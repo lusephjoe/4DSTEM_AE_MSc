@@ -196,6 +196,9 @@ def main():
         
         # Get sample to detect input size
         sample = full_dataset[0]
+        # Handle tuple format from ZarrDataset
+        if isinstance(sample, tuple):
+            sample = sample[0]
         detected_size = sample.shape[-1]  # Assume square images
         print(f"Detected input size: {detected_size}x{detected_size}")
         
