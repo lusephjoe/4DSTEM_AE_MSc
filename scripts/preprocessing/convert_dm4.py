@@ -171,8 +171,10 @@ def main():
     if args.scan_step > 1:
         raw_data = raw_data[::args.scan_step, ::args.scan_step]
     
+    # Rechunk the existing dask array to our desired chunk size
+    dask_data = da.rechunk(raw_data, chunks=(args.chunk_size, args.chunk_size, qy, qx))
+    
     # Reshape to (patterns, height, width) format
-    dask_data = da.from_array(raw_data, chunks=(args.chunk_size, args.chunk_size, qy, qx))
     dask_data = dask_data.reshape(total_patterns, qy, qx)
     
     # Apply downsampling if needed
