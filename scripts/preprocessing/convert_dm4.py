@@ -27,6 +27,7 @@ import zarr
 import dask.array as da
 import numcodecs
 import json
+from tqdm import tqdm
 
 # ─────────────────────────── helpers ────────────────────────────
 
@@ -207,36 +208,59 @@ def main():
     
     # Calculate min/max for metadata
     print("Computing data range for metadata...")
-    data_min = dask_data.min().compute()
-    data_max = dask_data.max().compute()
-    data_range = data_max - data_min
+    with tqdm(total=2, desc="Computing min/max", unit="operation") as pbar:
+        data_min = dask_data.min().compute()
+        pbar.update(1)
+        data_max = dask_data.max().compute()
+        pbar.update(1)
     
+    data_range = data_max - data_min
     print(f"Data range: {data_min:.3f} to {data_max:.3f}")
     
     # Apply data type conversion without normalization
     print(f"Converting to {args.dtype} without normalization...")
     
-    if args.dtype == "uint16":
-        # Convert to uint16 with simple scaling to preserve dynamic range
-        processed_data = ((dask_data - data_min) / data_range * 65535).astype("uint16")
-    elif args.dtype == "float16":
-        # Convert to float16 without normalization
-        processed_data = dask_data.astype("float16")
-    else:  # float32
-        # Keep as float32 without normalization
-        processed_data = dask_data.astype("float32")
+    with tqdm(total=1, desc=f"Converting to {args.dtype}", unit="operation") as pbar:
+        if args.dtype == "uint16":
+            # Convert to uint16 with simple scaling to preserve dynamic range
+            processed_data = ((dask_data - data_min) / data_range * 65535).astype("uint16")
+        elif args.dtype == "float16":
+            # Convert to float16 without normalization
+            processed_data = dask_data.astype("float16")
+        else:  # float32
+            # Keep as float32 without normalization
+            processed_data = dask_data.astype("float32")
+        pbar.update(1)
     
     # Save to zarr
     print(f"Saving to zarr format: {args.output}")
     print(f"Compression: Blosc-zstd level {args.compression_level} with bit-shuffle")
     
-    # Save to zarr with compression - use zarr v2 format for compatibility
-    da.to_zarr(processed_data, args.output, 
-               compressor=numcodecs.Blosc(cname="zstd", 
-                                        clevel=args.compression_level, 
-                                        shuffle=numcodecs.Blosc.BITSHUFFLE),
-               overwrite=True,
-               zarr_version=2)
+    # Save to zarr with compression and progress bar
+    print("Saving data to zarr...")
+    
+    # Create a progress bar for the zarr writing
+    total_chunks = len(processed_data.chunks[0])
+    
+    with tqdm(total=total_chunks, desc="Writing zarr chunks", unit="chunk") as pbar:
+        # Custom progress callback
+        def progress_callback(block_id=None):
+            if block_id is not None:
+                pbar.update(1)
+        
+        # Use store with progress tracking
+        z = zarr.open(str(args.output), mode='w', 
+                     shape=processed_data.shape, 
+                     chunks=processed_data.chunks,
+                     dtype=processed_data.dtype,
+                     compressor=numcodecs.Blosc(cname="zstd", 
+                                              clevel=args.compression_level, 
+                                              shuffle=numcodecs.Blosc.BITSHUFFLE),
+                     zarr_version=2)
+        
+        # Store with progress
+        da.store(processed_data, z, compute=True)
+        pbar.update(total_chunks - pbar.n)  # Ensure we reach 100%
     
     # Save metadata for reconstruction
     metadata = {
