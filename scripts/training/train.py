@@ -1,6 +1,7 @@
 """Train the autoencoder using PyTorch Lightning."""
 import argparse, torch, pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
+import numpy as np
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, TensorDataset, Dataset
 from pathlib import Path
