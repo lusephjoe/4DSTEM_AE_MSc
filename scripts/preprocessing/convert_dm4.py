@@ -128,7 +128,7 @@ def main():
                    help="Take every n-th probe position along both scan axes")
     p.add_argument("--chunk_size", type=int, default=128, metavar="n",
                    help="Chunk size for zarr storage (patterns per chunk)")
-    p.add_argument("--dtype", choices=["uint16", "float16", "float32"], default="uint16",
+    p.add_argument("--dtype", choices=["uint16", "float16", "float32"], default="float16",
                    help="Output data type for compression")
     p.add_argument("--compression_level", type=int, default=4, metavar="n",
                    help="Compression level (1-9, higher = more compression)")
@@ -190,30 +190,26 @@ def main():
                                         new_axis=None,
                                         chunks=(args.chunk_size, qy_final, qx_final))
     
-    # Calculate min/max for normalization
-    print("Computing data range for normalization...")
+    # Calculate min/max for metadata
+    print("Computing data range for metadata...")
     data_min = dask_data.min().compute()
     data_max = dask_data.max().compute()
     data_range = data_max - data_min
     
     print(f"Data range: {data_min:.3f} to {data_max:.3f}")
     
-    # Apply normalization and data type conversion
-    print(f"Converting to {args.dtype} with normalization...")
+    # Apply data type conversion without normalization
+    print(f"Converting to {args.dtype} without normalization...")
     
     if args.dtype == "uint16":
-        # Convert to uint16 for maximum compression
-        normalized_data = ((dask_data - data_min) / data_range * 65535).astype("uint16")
+        # Convert to uint16 with simple scaling to preserve dynamic range
+        processed_data = ((dask_data - data_min) / data_range * 65535).astype("uint16")
     elif args.dtype == "float16":
-        # Apply log normalization then convert to float16
-        def normalize_chunk(chunk):
-            return normalise(chunk).astype("float16")
-        normalized_data = dask_data.map_blocks(normalize_chunk, dtype="float16")
+        # Convert to float16 without normalization
+        processed_data = dask_data.astype("float16")
     else:  # float32
-        # Apply log normalization
-        def normalize_chunk(chunk):
-            return normalise(chunk)
-        normalized_data = dask_data.map_blocks(normalize_chunk, dtype="float32")
+        # Keep as float32 without normalization
+        processed_data = dask_data.astype("float32")
     
     # Set up zarr compression
     compressor = numcodecs.Blosc(cname="zstd", 
@@ -227,7 +223,7 @@ def main():
     # Use zarr chunks that match dask chunks
     zarr_chunks = (args.chunk_size, qy_final, qx_final)
     
-    da.to_zarr(normalized_data, args.output, 
+    da.to_zarr(processed_data, args.output, 
                compressor=compressor, 
                overwrite=True,
                chunks=zarr_chunks)
