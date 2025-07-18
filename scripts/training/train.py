@@ -73,7 +73,7 @@ class ZarrDataset(Dataset):
         if x.dim() == 2:
             x = x.unsqueeze(0)
         
-        return x
+        return (x,)  # Return as tuple to match TensorDataset format
 
 class LitAE(pl.LightningModule):
     def __init__(self, latent_dim: int, lr: float, realtime_metrics: bool = False, 
