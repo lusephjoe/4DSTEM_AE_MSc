@@ -2,12 +2,70 @@
 import argparse, torch, pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
 import matplotlib.pyplot as plt
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, Dataset
 from pathlib import Path
 import sys
 sys.path.append(str(Path(__file__).parent.parent.parent))
 from models.autoencoder import Autoencoder
 from models.summary import show, calculate_metrics
+import zarr
+import json
+
+class ZarrDataset(Dataset):
+    """Dataset for lazy loading of zarr-compressed 4D-STEM data."""
+    
+    def __init__(self, zarr_path, metadata_path=None):
+        self.zarr_path = Path(zarr_path)
+        self.arr = zarr.open(str(zarr_path), mode="r")
+        
+        # Load metadata if available
+        if metadata_path is None:
+            metadata_path = self.zarr_path.parent / f"{self.zarr_path.stem}_metadata.json"
+        
+        if metadata_path.exists():
+            with open(metadata_path, 'r') as f:
+                self.metadata = json.load(f)
+        else:
+            # Default metadata if not found
+            self.metadata = {
+                "data_min": 0.0,
+                "data_max": 1.0,
+                "data_range": 1.0,
+                "dtype": "uint16"
+            }
+            print(f"Warning: No metadata found at {metadata_path}, using defaults")
+        
+        self.data_min = self.metadata["data_min"]
+        self.data_range = self.metadata["data_range"]
+        self.dtype = self.metadata["dtype"]
+        
+        print(f"Loaded zarr dataset: {self.arr.shape} patterns, dtype: {self.dtype}")
+        print(f"Data range: {self.data_min:.3f} to {self.data_min + self.data_range:.3f}")
+    
+    def __len__(self):
+        return self.arr.shape[0]
+    
+    def __getitem__(self, idx):
+        # Load pattern from zarr
+        pattern = self.arr[idx]
+        
+        # Convert to tensor
+        x = torch.from_numpy(pattern).float()
+        
+        # Dequantize if needed
+        if self.dtype == "uint16":
+            # Convert uint16 back to original range
+            x = x / 65535.0 * self.data_range + self.data_min
+        elif self.dtype == "float16":
+            # Already normalized, just convert to float32
+            x = x.float()
+        # float32 is already ready to use
+        
+        # Add channel dimension if needed
+        if x.dim() == 2:
+            x = x.unsqueeze(0)
+        
+        return x
 
 class LitAE(pl.LightningModule):
     def __init__(self, latent_dim: int, lr: float, realtime_metrics: bool = False, 
@@ -119,34 +177,72 @@ def main():
     
     pl.seed_everything(args.seed)
 
-    data = torch.load(args.data)
+    # Detect file format and load data accordingly
+    data_path = Path(args.data)
     
-    # Detect input size from data
-    if len(data.shape) == 4:  # (N, C, H, W)
-        detected_size = data.shape[-1]  # Assume square images
+    if data_path.suffix == '.zarr' or data_path.is_dir():
+        # Handle zarr format
+        print(f"Loading zarr dataset from: {data_path}")
+        full_dataset = ZarrDataset(data_path)
+        
+        # Get sample to detect input size
+        sample = full_dataset[0]
+        detected_size = sample.shape[-1]  # Assume square images
+        print(f"Detected input size: {detected_size}x{detected_size}")
+        
+        # Split dataset indices for train/validation (80/20 split)
+        total_size = len(full_dataset)
+        train_size = int(0.8 * total_size)
+        val_size = total_size - train_size
+        
+        # Create indices for splitting
+        indices = torch.randperm(total_size)
+        train_indices = indices[:train_size]
+        val_indices = indices[train_size:]
+        
+        # Create subset datasets
+        from torch.utils.data import Subset
+        train_ds = Subset(full_dataset, train_indices)
+        val_ds = Subset(full_dataset, val_indices)
+        
+        print(f"Created train/val split: {len(train_ds)} train, {len(val_ds)} validation")
+        
     else:
-        detected_size = args.input_size
+        # Handle traditional .pt format
+        print(f"Loading tensor dataset from: {data_path}")
+        data = torch.load(args.data)
+        
+        # Detect input size from data
+        if len(data.shape) == 4:  # (N, C, H, W)
+            detected_size = data.shape[-1]  # Assume square images
+        else:
+            detected_size = args.input_size
+        
+        print(f"Detected input size: {detected_size}x{detected_size}")
+        
+        # Split data into train/validation (80/20 split)
+        total_size = len(data)
+        train_size = int(0.8 * total_size)
+        val_size = total_size - train_size
+        
+        # Create indices for splitting
+        indices = torch.randperm(total_size)
+        train_indices = indices[:train_size]
+        val_indices = indices[train_size:]
+        
+        train_data = data[train_indices]
+        val_data = data[val_indices]
+        
+        train_ds = TensorDataset(train_data)
+        val_ds = TensorDataset(val_data)
     
-    print(f"Detected input size: {detected_size}x{detected_size}")
-    
-    # Split data into train/validation (80/20 split)
-    total_size = len(data)
-    train_size = int(0.8 * total_size)
-    val_size = total_size - train_size
-    
-    # Create indices for splitting
-    indices = torch.randperm(total_size)
-    train_indices = indices[:train_size]
-    val_indices = indices[train_size:]
-    
-    train_data = data[train_indices]
-    val_data = data[val_indices]
-    
-    train_ds = TensorDataset(train_data)
-    val_ds = TensorDataset(val_data)
-    
-    train_dl = DataLoader(train_ds, batch_size=args.batch, shuffle=True, num_workers=4, pin_memory=True)
-    val_dl = DataLoader(val_ds, batch_size=args.batch, shuffle=False, num_workers=4, pin_memory=True)
+    # Create data loaders
+    train_dl = DataLoader(train_ds, batch_size=args.batch, shuffle=True, 
+                         num_workers=args.num_workers, pin_memory=args.pin_memory,
+                         persistent_workers=args.persistent_workers)
+    val_dl = DataLoader(val_ds, batch_size=args.batch, shuffle=False, 
+                       num_workers=args.num_workers, pin_memory=args.pin_memory,
+                       persistent_workers=args.persistent_workers)
 
     model = LitAE(args.latent, args.lr, args.realtime_metrics, 
                   args.lambda_act, args.lambda_sim, args.lambda_div,

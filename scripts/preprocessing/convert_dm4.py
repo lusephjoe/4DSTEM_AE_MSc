@@ -23,6 +23,10 @@ import torch
 import hyperspy.api as hs  # pip install hyperspy
 from scipy.ndimage import gaussian_filter
 import gc
+import zarr
+import dask.array as da
+import numcodecs
+import json
 
 # ─────────────────────────── helpers ────────────────────────────
 
@@ -111,9 +115,9 @@ def process_chunk_single_threaded(sig, row_start, row_end, scan_step, downsample
 # ───────────────────────────── CLI ─────────────────────────────
 
 def main():
-    p = argparse.ArgumentParser(description="Convert .dm4 4D-STEM file → PyTorch tensor")
+    p = argparse.ArgumentParser(description="Convert .dm4 4D-STEM file → Zarr compressed tensor")
     p.add_argument("--input", type=Path, required=True, help="Input .dm4 file")
-    p.add_argument("--output", type=Path, required=True, help="Output .pt tensor file")
+    p.add_argument("--output", type=Path, required=True, help="Output .zarr file")
     p.add_argument("--downsample", type=int, default=1, metavar="k",
                    help="Factor k; diffraction pattern size becomes Q/k * Q/k")
     p.add_argument("--mode", choices=["bin", "stride", "gauss", "fft"], default="bin",
@@ -122,16 +126,18 @@ def main():
                    help="Gaussian sigma (pixels) if --mode gauss (default 0.8)")
     p.add_argument("--scan_step", type=int, default=1, metavar="n",
                    help="Take every n-th probe position along both scan axes")
-    p.add_argument("--max_memory_gb", type=float, default=8.0,
-                   help="Maximum memory to use during conversion (GB)")
-    p.add_argument("--compress", action="store_true",
-                   help="Enable compression when saving (reduces file size)")
+    p.add_argument("--chunk_size", type=int, default=128, metavar="n",
+                   help="Chunk size for zarr storage (patterns per chunk)")
+    p.add_argument("--dtype", choices=["uint16", "float16", "float32"], default="uint16",
+                   help="Output data type for compression")
+    p.add_argument("--compression_level", type=int, default=4, metavar="n",
+                   help="Compression level (1-9, higher = more compression)")
     args = p.parse_args()
     
-    print("Using single-threaded processing for memory efficiency")
+    print("Using zarr-based streaming compression for memory efficiency")
 
-    # Load .dm4 with lazy loading to check size first
-    print(f"Loading {args.input} (lazy mode to check size)...")
+    # Load .dm4 with lazy loading
+    print(f"Loading {args.input} (lazy mode)...")
     sig = hs.load(args.input.as_posix(), lazy=True)
     original_shape = sig.data.shape
     print(f"Original shape: {original_shape}")
@@ -153,85 +159,108 @@ def main():
     else:
         qy_final, qx_final = qy, qx
     
-    # Estimate memory requirements
     total_patterns = ny * nx
-    pattern_size_mb = (qy_final * qx_final * 4) / (1024**2)  # float32 size
-    estimated_memory_gb = (total_patterns * pattern_size_mb) / 1024
-    
     print(f"Total patterns: {total_patterns}")
     print(f"Final pattern size: {qy_final}x{qx_final}")
-    print(f"Estimated memory needed: {estimated_memory_gb:.2f} GB")
     
-    # Use single-threaded chunked processing for memory efficiency
-    print(f"Large file detected ({estimated_memory_gb:.2f} GB estimated memory)")
-    print("Processing with single-threaded chunked approach to stay within memory limits...")
+    # Create dask array from lazy hyperspy signal
+    print("Creating dask array...")
+    raw_data = sig.data
     
-    # Calculate chunk size based on available memory
-    # Use conservative estimate: process chunks that fit in available memory
-    memory_safety_factor = 0.3  # Use 30% of available memory as safety margin
-    available_memory_gb = args.max_memory_gb * memory_safety_factor
+    # Apply scan step and reshaping
+    if args.scan_step > 1:
+        raw_data = raw_data[::args.scan_step, ::args.scan_step]
     
-    patterns_per_row = nx
-    # Account for processing overhead (normalization, downsampling need extra memory)
-    processing_overhead = 4.0  # 4x memory overhead for processing
-    effective_pattern_size_mb = pattern_size_mb * processing_overhead
+    # Reshape to (patterns, height, width) format
+    dask_data = da.from_array(raw_data, chunks=(args.chunk_size, args.chunk_size, qy, qx))
+    dask_data = dask_data.reshape(total_patterns, qy, qx)
     
-    rows_per_chunk = max(1, int(available_memory_gb * 1024 / (patterns_per_row * effective_pattern_size_mb)))
-    rows_per_chunk = min(rows_per_chunk, ny)
-    
-    # Ensure we don't create chunks that are too small (minimum 1 row)
-    if rows_per_chunk < 1:
-        rows_per_chunk = 1
-        print(f"WARNING: Chunk size is very small. Consider increasing --max_memory_gb or using --downsample")
-    
-    print(f"Processing {rows_per_chunk} rows per chunk (using {available_memory_gb:.1f} GB safely)...")
-    
-    # Create work chunks
-    work_chunks = []
-    for row_start in range(0, ny, rows_per_chunk):
-        row_end = min(row_start + rows_per_chunk, ny)
-        work_chunks.append((row_start, row_end))
-    
-    print(f"Created {len(work_chunks)} work chunks")
-    
-    # Process chunks sequentially
-    all_tensors = []
-    
-    for i, (row_start, row_end) in enumerate(work_chunks):
-        print(f"Processing chunk {i+1}/{len(work_chunks)} (rows {row_start}-{row_end-1})...")
+    # Apply downsampling if needed
+    if args.downsample > 1:
+        print(f"Applying downsampling with mode: {args.mode}")
+        # Process downsampling in chunks to manage memory
+        def downsample_chunk(chunk):
+            return downsample_patterns(chunk, args.downsample, args.mode, args.sigma)
         
-        chunk_data = process_chunk_single_threaded(
-            sig, row_start, row_end, args.scan_step, args.downsample, args.mode, args.sigma
-        )
-        
-        if chunk_data is not None:
-            chunk_tensor = torch.from_numpy(chunk_data).unsqueeze(1)
-            all_tensors.append(chunk_tensor)
-            del chunk_data, chunk_tensor
-            gc.collect()  # Force garbage collection after each chunk
+        dask_data = dask_data.map_blocks(downsample_chunk, 
+                                        dtype=dask_data.dtype,
+                                        drop_axis=None,
+                                        new_axis=None,
+                                        chunks=(args.chunk_size, qy_final, qx_final))
     
-    # Concatenate all chunks
-    print("Concatenating all chunks...")
-    tensor = torch.cat(all_tensors, dim=0)
-    del all_tensors
+    # Calculate min/max for normalization
+    print("Computing data range for normalization...")
+    data_min = dask_data.min().compute()
+    data_max = dask_data.max().compute()
+    data_range = data_max - data_min
     
-    print(f"Final tensor shape: {tensor.shape}")
-    print(f"Memory usage: {tensor.element_size() * tensor.nelement() / 1024**3:.2f} GB")
+    print(f"Data range: {data_min:.3f} to {data_max:.3f}")
     
-    # Save tensor
-    print(f"Saving to {args.output}...")
-    if args.compress:
-        # Use new ZIP-based serialization for compression
-        torch.save(tensor, args.output, _use_new_zipfile_serialization=True)
-        print("Saved with compression enabled")
-    else:
-        torch.save(tensor, args.output)
-        print("Saved without compression")
+    # Apply normalization and data type conversion
+    print(f"Converting to {args.dtype} with normalization...")
+    
+    if args.dtype == "uint16":
+        # Convert to uint16 for maximum compression
+        normalized_data = ((dask_data - data_min) / data_range * 65535).astype("uint16")
+    elif args.dtype == "float16":
+        # Apply log normalization then convert to float16
+        def normalize_chunk(chunk):
+            return normalise(chunk).astype("float16")
+        normalized_data = dask_data.map_blocks(normalize_chunk, dtype="float16")
+    else:  # float32
+        # Apply log normalization
+        def normalize_chunk(chunk):
+            return normalise(chunk)
+        normalized_data = dask_data.map_blocks(normalize_chunk, dtype="float32")
+    
+    # Set up zarr compression
+    compressor = numcodecs.Blosc(cname="zstd", 
+                                clevel=args.compression_level, 
+                                shuffle=numcodecs.Blosc.BITSHUFFLE)
+    
+    # Save to zarr
+    print(f"Saving to zarr format: {args.output}")
+    print(f"Compression: Blosc-zstd level {args.compression_level} with bit-shuffle")
+    
+    # Use zarr chunks that match dask chunks
+    zarr_chunks = (args.chunk_size, qy_final, qx_final)
+    
+    da.to_zarr(normalized_data, args.output, 
+               compressor=compressor, 
+               overwrite=True,
+               chunks=zarr_chunks)
+    
+    # Save metadata for reconstruction
+    metadata = {
+        "original_shape": original_shape,
+        "final_shape": (total_patterns, qy_final, qx_final),
+        "data_min": float(data_min),
+        "data_max": float(data_max),
+        "data_range": float(data_range),
+        "dtype": args.dtype,
+        "downsample": args.downsample,
+        "scan_step": args.scan_step,
+        "mode": args.mode,
+        "sigma": args.sigma
+    }
+    
+    metadata_path = args.output.parent / f"{args.output.stem}_metadata.json"
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+    
+    print(f"Metadata saved to: {metadata_path}")
     
     # Check file size
-    file_size_gb = args.output.stat().st_size / 1024**3
-    print(f"Output file size: {file_size_gb:.2f} GB")
-    print(f"Saved {tensor.shape[0]} patterns of size {tensor.shape[2]}x{tensor.shape[3]} → {args.output}")
+    if args.output.exists():
+        file_size_gb = sum(f.stat().st_size for f in args.output.rglob('*') if f.is_file()) / 1024**3
+        print(f"Output file size: {file_size_gb:.2f} GB")
+        
+        # Calculate compression ratio
+        original_size_gb = total_patterns * qy_final * qx_final * 4 / 1024**3  # float32 size
+        compression_ratio = original_size_gb / file_size_gb
+        print(f"Compression ratio: {compression_ratio:.1f}x (from {original_size_gb:.2f} GB to {file_size_gb:.2f} GB)")
+    
+    print(f"Saved {total_patterns} patterns of size {qy_final}x{qx_final} → {args.output}")
 
 if __name__ == "__main__":
     main()
