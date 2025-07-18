@@ -46,8 +46,16 @@ class ZarrDataset(Dataset):
         return self.arr.shape[0]
     
     def __getitem__(self, idx):
+        # Convert PyTorch tensor indices to numpy/python integers
+        if torch.is_tensor(idx):
+            idx = idx.item()
+        
         # Load pattern from zarr
         pattern = self.arr[idx]
+        
+        # Convert to numpy array first, then to tensor
+        if not isinstance(pattern, np.ndarray):
+            pattern = np.array(pattern)
         
         # Convert to tensor
         x = torch.from_numpy(pattern).float()
