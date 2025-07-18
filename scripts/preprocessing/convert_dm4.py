@@ -211,19 +211,17 @@ def main():
         # Keep as float32 without normalization
         processed_data = dask_data.astype("float32")
     
-    # Set up zarr compression
-    compressor = numcodecs.Blosc(cname="zstd", 
-                                clevel=args.compression_level, 
-                                shuffle=numcodecs.Blosc.BITSHUFFLE)
-    
     # Save to zarr
     print(f"Saving to zarr format: {args.output}")
     print(f"Compression: Blosc-zstd level {args.compression_level} with bit-shuffle")
     
-    # Save to zarr - let dask handle chunking automatically
+    # Save to zarr with compression - use zarr v2 format for compatibility
     da.to_zarr(processed_data, args.output, 
-               compressor=compressor, 
-               overwrite=True)
+               compressor=numcodecs.Blosc(cname="zstd", 
+                                        clevel=args.compression_level, 
+                                        shuffle=numcodecs.Blosc.BITSHUFFLE),
+               overwrite=True,
+               zarr_version=2)
     
     # Save metadata for reconstruction
     metadata = {
