@@ -233,32 +233,32 @@ def main():
     print("Saving data to zarr...")
     print("Note: This operation may take several minutes without progress updates")
     
-    # Force zarr v2 for compatibility and use simple approach
-    import zarr.storage
-    
+    # Use manual chunked writing to avoid zarr v3 compatibility issues
     compressor = numcodecs.Blosc(cname="zstd", 
                                 clevel=args.compression_level, 
                                 shuffle=numcodecs.Blosc.BITSHUFFLE)
     
-    # Use zarr v2 storage format explicitly
-    store = zarr.storage.DirectoryStore(str(args.output))
+    # Remove existing directory if it exists
+    import shutil
+    if Path(args.output).exists():
+        shutil.rmtree(args.output)
     
-    # Create zarr v2 array - this forces v2 format which handles chunks better
-    z = zarr.create(shape=processed_data.shape,
-                   chunks=(args.chunk_size, qy_final, qx_final),
-                   dtype=processed_data.dtype,
-                   compressor=compressor,
-                   store=store,
-                   zarr_format=2,
-                   overwrite=True)
+    # Create zarr array with simplified approach
+    z = zarr.open(str(args.output), 
+                 mode='w',
+                 shape=processed_data.shape,
+                 chunks=(args.chunk_size, qy_final, qx_final),
+                 dtype=processed_data.dtype,
+                 compressor=compressor)
     
-    # Store data chunk by chunk to avoid broadcast issues
+    # Store data chunk by chunk to handle irregular final chunk
     print(f"Writing {len(processed_data.chunks[0])} chunks...")
     for i, chunk_size_actual in enumerate(processed_data.chunks[0]):
         start_idx = sum(processed_data.chunks[0][:i])
         end_idx = start_idx + chunk_size_actual
-        chunk_data = processed_data[start_idx:end_idx]
-        z[start_idx:end_idx] = chunk_data.compute()
+        print(f"Writing chunk {i+1}/{len(processed_data.chunks[0])} (patterns {start_idx}-{end_idx-1})")
+        chunk_data = processed_data[start_idx:end_idx].compute()
+        z[start_idx:end_idx] = chunk_data
     
     # Save metadata for reconstruction
     metadata = {
