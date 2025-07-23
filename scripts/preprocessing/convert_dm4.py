@@ -233,14 +233,15 @@ def main():
     print("Saving data to zarr...")
     print("Note: This operation may take several minutes without progress updates")
     
-    # Use da.to_zarr for simpler, more reliable writing
+    # Use da.to_zarr with zarr v2 format for compatibility
     compressor = numcodecs.Blosc(cname="zstd", 
                                 clevel=args.compression_level, 
                                 shuffle=numcodecs.Blosc.BITSHUFFLE)
     
     da.to_zarr(processed_data, str(args.output), 
                compressor=compressor, 
-               overwrite=True)
+               overwrite=True,
+               zarr_version=2)
     
     # Save metadata for reconstruction
     metadata = {
