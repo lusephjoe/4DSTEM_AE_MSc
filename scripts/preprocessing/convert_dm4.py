@@ -233,32 +233,15 @@ def main():
     print("Saving data to zarr...")
     print("Note: This operation may take several minutes without progress updates")
     
-    # Use manual chunked writing to avoid zarr v3 compatibility issues
+    # Use zarr 2.0.0 with da.to_zarr - simple and efficient approach
     compressor = numcodecs.Blosc(cname="zstd", 
                                 clevel=args.compression_level, 
                                 shuffle=numcodecs.Blosc.BITSHUFFLE)
     
-    # Remove existing directory if it exists
-    import shutil
-    if Path(args.output).exists():
-        shutil.rmtree(args.output)
-    
-    # Create zarr array with simplified approach
-    z = zarr.open(str(args.output), 
-                 mode='w',
-                 shape=processed_data.shape,
-                 chunks=(args.chunk_size, qy_final, qx_final),
-                 dtype=processed_data.dtype,
-                 compressor=compressor)
-    
-    # Store data chunk by chunk to handle irregular final chunk
-    print(f"Writing {len(processed_data.chunks[0])} chunks...")
-    for i, chunk_size_actual in enumerate(processed_data.chunks[0]):
-        start_idx = sum(processed_data.chunks[0][:i])
-        end_idx = start_idx + chunk_size_actual
-        print(f"Writing chunk {i+1}/{len(processed_data.chunks[0])} (patterns {start_idx}-{end_idx-1})")
-        chunk_data = processed_data[start_idx:end_idx].compute()
-        z[start_idx:end_idx] = chunk_data
+    # With zarr 2.0.0, da.to_zarr handles irregular chunks properly
+    da.to_zarr(processed_data, str(args.output), 
+               compressor=compressor, 
+               overwrite=True)
     
     # Save metadata for reconstruction
     metadata = {
