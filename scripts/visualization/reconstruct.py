@@ -149,12 +149,29 @@ def load_model_from_checkpoint(checkpoint_path: str, device: str = "cpu") -> Lit
     
     # Quick test to see if model produces meaningful output
     with torch.no_grad():
-        test_input = torch.randn(1, 1, 256, 256).to(device)
-        test_output = model(test_input)
-        print(f"Test output stats: mean={test_output.mean():.6f}, std={test_output.std():.6f}, max={test_output.max():.6f}")
+        # Test with different inputs to see if model varies output
+        test_input1 = torch.randn(1, 1, 256, 256).to(device)
+        test_input2 = torch.randn(1, 1, 256, 256).to(device)
         
-        if test_output.std() < 1e-6:
-            print("WARNING: Model outputs appear to be constant (not trained properly)")
+        test_output1 = model(test_input1)
+        test_output2 = model(test_input2)
+        
+        print(f"Test output 1 stats: mean={test_output1.mean():.6f}, std={test_output1.std():.6f}, max={test_output1.max():.6f}")
+        print(f"Test output 2 stats: mean={test_output2.mean():.6f}, std={test_output2.std():.6f}, max={test_output2.max():.6f}")
+        
+        if test_output1.std() < 1e-6 or test_output2.std() < 1e-6:
+            print("⚠️  WARNING: Model outputs appear to be constant (not trained properly)")
+        
+        # Check if outputs are identical for different inputs
+        if torch.allclose(test_output1, test_output2, atol=1e-6):
+            print("⚠️  WARNING: Model produces identical outputs for different inputs!")
+        else:
+            print("✓ Model produces different outputs for different inputs")
+            
+        # Check if model weights look reasonable
+        total_params = sum(p.numel() for p in model.parameters())
+        nonzero_params = sum((p != 0).sum().item() for p in model.parameters())
+        print(f"Model has {total_params} parameters, {nonzero_params} non-zero ({100*nonzero_params/total_params:.1f}%)")
     
     return model
 
@@ -164,8 +181,25 @@ def generate_reconstructions(model: LitAE, data: torch.Tensor, device: str = "cp
     model.eval()
     data = data.to(device)
     
+    print(f"Input data stats: mean={data.mean():.6f}, std={data.std():.6f}, min={data.min():.6f}, max={data.max():.6f}")
+    
     with torch.no_grad():
         reconstructed = model(data)
+    
+    print(f"Reconstructed data stats: mean={reconstructed.mean():.6f}, std={reconstructed.std():.6f}, min={reconstructed.min():.6f}, max={reconstructed.max():.6f}")
+    
+    # Check if all reconstructions are identical
+    if len(reconstructed) > 1:
+        first_recon = reconstructed[0]
+        identical_count = 0
+        for i in range(1, len(reconstructed)):
+            if torch.allclose(first_recon, reconstructed[i], atol=1e-6):
+                identical_count += 1
+        
+        if identical_count == len(reconstructed) - 1:
+            print("⚠️  WARNING: All reconstructions are identical! Model may not be properly trained.")
+        else:
+            print(f"✓ Reconstructions vary ({identical_count}/{len(reconstructed)-1} identical to first)")
     
     return reconstructed
 
