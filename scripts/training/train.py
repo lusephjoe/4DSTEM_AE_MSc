@@ -9,7 +9,14 @@ from pathlib import Path
 import sys
 sys.path.append(str(Path(__file__).parent.parent.parent))
 from models.autoencoder import Autoencoder
-from models.summary import show, calculate_metrics
+
+# Suppress stem_visualization warnings once at import
+try:
+    from models.summary import show, calculate_metrics
+except ImportError:
+    import warnings
+    warnings.filterwarnings("ignore", message=".*stem_visualization.*")
+    from models.summary import show, calculate_metrics
 import zarr
 import json
 import datetime
@@ -58,6 +65,7 @@ class ZarrDataset(Dataset):
         self.metadata = self._load_metadata(metadata_path)
         
         # Load or compute global normalization statistics ONCE
+        print("Loading/computing normalization statistics...")
         self._load_or_compute_global_stats()
         
         print(f"Loaded zarr dataset: {self.arr.shape} patterns, dtype: {self.metadata['dtype']}")
@@ -88,49 +96,72 @@ class ZarrDataset(Dataset):
             self._compute_and_save_global_stats(stats_path)
     
     def _compute_and_save_global_stats(self, stats_path):
-        """Compute global log-space statistics once using sampling for speed."""
-        # Sample-based estimation for speed (use subset for large datasets)
-        total_patterns = self.arr.shape[0]  # Use .shape[0] instead of len() for zarr arrays
-        n_samples = min(5000, total_patterns)
+        """Compute global log-space statistics efficiently using streaming approach."""
+        total_patterns = self.arr.shape[0]
+        
+        # Use much smaller sample size for very large datasets to avoid hanging
+        n_samples = min(500, total_patterns // 10)  # Much smaller sample, but representative
         print(f"Using {n_samples} samples to estimate global statistics from {total_patterns} total patterns...")
         
-        indices = np.random.choice(total_patterns, n_samples, replace=False)
+        # Use evenly spaced indices instead of random for better coverage
+        step = max(1, total_patterns // n_samples)
+        indices = np.arange(0, total_patterns, step)[:n_samples]
         
-        log_values = []
+        # Streaming computation to avoid memory issues
+        running_mean = 0.0
+        running_m2 = 0.0  # For variance calculation
+        total_count = 0
+        
+        print("Computing statistics with streaming approach...")
         for i, idx in enumerate(indices):
-            if i % 1000 == 0:
-                print(f"Processing sample {i+1}/{n_samples}...")
+            if i % 100 == 0:  # More frequent updates
+                print(f"Processing sample {i+1}/{len(indices)}... ({100*i/len(indices):.1f}%)")
             
-            pattern = np.array(self.arr[idx])
-            
-            # Apply same dequantization as in training
-            if self.metadata["dtype"] == "uint16":
-                pattern = pattern.astype("float32") / 65535.0 * self.metadata["data_range"] + self.metadata["data_min"]
-            elif self.metadata["dtype"] == "float16":
-                pattern = pattern.astype("float32")
-            
-            # Apply log scaling
-            log_pattern = np.log(pattern + 1e-6)
-            log_values.append(log_pattern.flatten())
+            try:
+                # Load single pattern
+                pattern = np.array(self.arr[idx])
+                
+                # Apply same dequantization as in training
+                if self.metadata["dtype"] == "uint16":
+                    pattern = pattern.astype("float32") / 65535.0 * self.metadata["data_range"] + self.metadata["data_min"]
+                elif self.metadata["dtype"] == "float16":
+                    pattern = pattern.astype("float32")
+                
+                # Apply log scaling
+                log_pattern = np.log(pattern + 1e-6)
+                
+                # Use Welford's online algorithm for numerical stability and memory efficiency
+                flat_pattern = log_pattern.flatten()
+                for value in flat_pattern[::100]:  # Subsample pixels for speed (every 100th pixel)
+                    total_count += 1
+                    delta = value - running_mean
+                    running_mean += delta / total_count
+                    delta2 = value - running_mean
+                    running_m2 += delta * delta2
+                
+            except Exception as e:
+                print(f"Warning: Failed to process pattern {idx}: {e}")
+                continue
         
-        # Combine all samples and compute global statistics
-        print("Computing global mean and std...")
-        all_log_values = np.concatenate(log_values)
-        self.global_log_mean = float(np.mean(all_log_values))
-        self.global_log_std = float(np.std(all_log_values))
+        # Finalize statistics
+        self.global_log_mean = float(running_mean)
+        self.global_log_std = float(np.sqrt(running_m2 / (total_count - 1)) if total_count > 1 else 1.0)
         
         # Save for future use
         stats = {
             'log_mean': self.global_log_mean,
             'log_std': self.global_log_std,
-            'n_samples_used': n_samples,
-            'computed_on': datetime.datetime.now().isoformat()
+            'n_samples_used': len(indices),
+            'pixels_sampled': total_count,
+            'computed_on': datetime.datetime.now().isoformat(),
+            'method': 'streaming_welford'
         }
         
         with open(stats_path, 'w') as f:
             json.dump(stats, f, indent=2)
         
         print(f"Global stats computed and saved: mean={self.global_log_mean:.4f}, std={self.global_log_std:.4f}")
+        print(f"Used {len(indices)} patterns and {total_count} pixel samples")
     
     def __len__(self):
         return self.arr.shape[0]
@@ -282,22 +313,22 @@ def create_train_val_split(full_dataset, no_validation, logger):
 
 def create_data_loaders(train_ds, val_ds, args):
     """Create optimized training and validation data loaders."""
-    # Optimize batch size for mixed precision (can use larger batches with 16-bit)
-    optimized_batch_size = min(args.batch * 2, 64)  # Cap at 64 for memory safety with 1024x1024 images
+    # Reduce workers to prevent log duplication - use fewer workers for cleaner output
+    num_workers = min(4, args.num_workers)  # Reduce workers to minimize log spam
     
     dataloader_kwargs = {
-        'batch_size': optimized_batch_size,
-        'num_workers': min(8, args.num_workers * 2),  # Increase workers for better CPU utilization
+        'batch_size': args.batch,
+        'num_workers': num_workers,
         'pin_memory': args.pin_memory,
-        'persistent_workers': args.persistent_workers,
-        'prefetch_factor': 4,  # Prefetch 4 batches per worker
+        'persistent_workers': args.persistent_workers and num_workers > 0,
+        'prefetch_factor': 2,  # Reduce prefetch to minimize memory usage
         'drop_last': True,     # Ensure consistent batch sizes for mixed precision
     }
     
     train_dl = DataLoader(train_ds, shuffle=True, **dataloader_kwargs)
     val_dl = DataLoader(val_ds, shuffle=False, **dataloader_kwargs) if val_ds else None
     
-    print(f"Optimized data loading: batch_size={optimized_batch_size}, num_workers={dataloader_kwargs['num_workers']}")
+    print(f"Data loading config: batch_size={args.batch}, num_workers={num_workers}")
     return train_dl, val_dl
 
 def create_model(args, detected_size):
@@ -362,9 +393,11 @@ def setup_trainer(args, base_name):
         logger=tb_logger,
         enable_progress_bar=True,
         callbacks=[checkpoint_callback],
-        precision="16-mixed",  # Enable mixed precision for 2x speedup
-        gradient_clip_val=1.0,  # Stabilize mixed precision training
-        accumulate_grad_batches=args.accumulate_grad_batches  # Enable gradient accumulation
+        precision="16-mixed",
+        gradient_clip_val=1.0,
+        accumulate_grad_batches=args.accumulate_grad_batches,
+        log_every_n_steps=50,  # Reduce logging frequency
+        enable_model_summary=False  # Disable model summary to reduce output
     )
 
 def train_model(trainer, model, train_dl, val_dl, logger, start_time):
