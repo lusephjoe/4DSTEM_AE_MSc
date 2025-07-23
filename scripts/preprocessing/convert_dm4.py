@@ -206,24 +206,17 @@ def main():
                                         new_axis=None,
                                         chunks=(new_safe_chunk_size, qy_final, qx_final))
     
-    # Calculate min/max for metadata
-    print("Computing data range for metadata...")
-    with tqdm(total=2, desc="Computing min/max", unit="operation") as pbar:
-        data_min = dask_data.min().compute()
-        pbar.update(1)
-        data_max = dask_data.max().compute()
-        pbar.update(1)
+    # Skip min/max computation - handle precision later
+    print(f"Converting to {args.dtype} (skipping min/max computation)...")
     
+    # Use default range for metadata
+    data_min, data_max = 0.0, 1.0
     data_range = data_max - data_min
-    print(f"Data range: {data_min:.3f} to {data_max:.3f}")
-    
-    # Apply data type conversion without normalization
-    print(f"Converting to {args.dtype} without normalization...")
     
     with tqdm(total=1, desc=f"Converting to {args.dtype}", unit="operation") as pbar:
         if args.dtype == "uint16":
-            # Convert to uint16 with simple scaling to preserve dynamic range
-            processed_data = ((dask_data - data_min) / data_range * 65535).astype("uint16")
+            # Convert to uint16 without scaling (assumes data already in 0-1 range)
+            processed_data = (dask_data * 65535).astype("uint16")
         elif args.dtype == "float16":
             # Convert to float16 without normalization
             processed_data = dask_data.astype("float16")
