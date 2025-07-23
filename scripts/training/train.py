@@ -11,6 +11,52 @@ from models.autoencoder import Autoencoder
 from models.summary import show, calculate_metrics
 import zarr
 import json
+import datetime
+import logging
+
+def setup_logging(output_dir: Path, args) -> logging.Logger:
+    """Set up logging to both console and file."""
+    # Create output directory if it doesn't exist
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create log file with timestamp
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = output_dir / f"training_log_{timestamp}.txt"
+    
+    # Create logger
+    logger = logging.getLogger('training')
+    logger.setLevel(logging.INFO)
+    
+    # Clear any existing handlers
+    logger.handlers = []
+    
+    # Create formatters
+    file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    console_formatter = logging.Formatter('%(levelname)s - %(message)s')
+    
+    # File handler
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(file_formatter)
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(console_formatter)
+    
+    # Add handlers to logger
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    # Log initial configuration
+    logger.info("="*60)
+    logger.info("4D-STEM AUTOENCODER TRAINING LOG")
+    logger.info("="*60)
+    logger.info(f"Log file: {log_file}")
+    logger.info(f"Training arguments: {vars(args)}")
+    logger.info("="*60)
+    
+    return logger
 
 class ZarrDataset(Dataset):
     """Dataset for lazy loading of zarr-compressed 4D-STEM data."""
@@ -173,8 +219,16 @@ def main():
     p.add_argument("--pin_memory", action="store_true", default=True, help="Pin memory for faster GPU transfer")
     p.add_argument("--persistent_workers", action="store_true", help="Keep workers alive between epochs")
     p.add_argument("--profile", action="store_true", help="Enable PyTorch profiler for performance analysis")
+    p.add_argument("--no_validation", action="store_true", help="Disable train/validation split - use entire dataset for training")
 
     args = p.parse_args()
+
+    # Set up logging
+    logger = setup_logging(args.output_dir, args)
+    
+    # Record start time
+    start_time = datetime.datetime.now()
+    logger.info(f"Training started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
     # Handle device selection more robustly
     if args.device == "auto":
@@ -186,7 +240,7 @@ def main():
         else:
             args.device = "cpu"
     
-    print(f"Using device: {args.device}")
+    logger.info(f"Using device: {args.device}")
     
     pl.seed_everything(args.seed)
 
@@ -195,7 +249,7 @@ def main():
     
     if data_path.suffix == '.zarr' or data_path.is_dir():
         # Handle zarr format
-        print(f"Loading zarr dataset from: {data_path}")
+        logger.info(f"Loading zarr dataset from: {data_path}")
         full_dataset = ZarrDataset(data_path)
         
         # Get sample to detect input size
@@ -204,28 +258,34 @@ def main():
         if isinstance(sample, tuple):
             sample = sample[0]
         detected_size = sample.shape[-1]  # Assume square images
-        print(f"Detected input size: {detected_size}x{detected_size}")
+        logger.info(f"Detected input size: {detected_size}x{detected_size}")
         
-        # Split dataset indices for train/validation (80/20 split)
-        total_size = len(full_dataset)
-        train_size = int(0.8 * total_size)
-        val_size = total_size - train_size
-        
-        # Create indices for splitting
-        indices = torch.randperm(total_size)
-        train_indices = indices[:train_size]
-        val_indices = indices[train_size:]
-        
-        # Create subset datasets
-        from torch.utils.data import Subset
-        train_ds = Subset(full_dataset, train_indices)
-        val_ds = Subset(full_dataset, val_indices)
-        
-        print(f"Created train/val split: {len(train_ds)} train, {len(val_ds)} validation")
+        if args.no_validation:
+            # Use entire dataset for training
+            train_ds = full_dataset
+            val_ds = None
+            logger.info(f"Using entire dataset for training: {len(train_ds)} patterns (no validation)")
+        else:
+            # Split dataset indices for train/validation (80/20 split)
+            total_size = len(full_dataset)
+            train_size = int(0.8 * total_size)
+            val_size = total_size - train_size
+            
+            # Create indices for splitting
+            indices = torch.randperm(total_size)
+            train_indices = indices[:train_size]
+            val_indices = indices[train_size:]
+            
+            # Create subset datasets
+            from torch.utils.data import Subset
+            train_ds = Subset(full_dataset, train_indices)
+            val_ds = Subset(full_dataset, val_indices)
+            
+            logger.info(f"Created train/val split: {len(train_ds)} train, {len(val_ds)} validation")
         
     else:
         # Handle traditional .pt format
-        print(f"Loading tensor dataset from: {data_path}")
+        logger.info(f"Loading tensor dataset from: {data_path}")
         data = torch.load(args.data)
         
         # Detect input size from data
@@ -234,31 +294,43 @@ def main():
         else:
             detected_size = args.input_size
         
-        print(f"Detected input size: {detected_size}x{detected_size}")
+        logger.info(f"Detected input size: {detected_size}x{detected_size}")
         
-        # Split data into train/validation (80/20 split)
-        total_size = len(data)
-        train_size = int(0.8 * total_size)
-        val_size = total_size - train_size
-        
-        # Create indices for splitting
-        indices = torch.randperm(total_size)
-        train_indices = indices[:train_size]
-        val_indices = indices[train_size:]
-        
-        train_data = data[train_indices]
-        val_data = data[val_indices]
-        
-        train_ds = TensorDataset(train_data)
-        val_ds = TensorDataset(val_data)
+        if args.no_validation:
+            # Use entire dataset for training
+            train_ds = TensorDataset(data)
+            val_ds = None
+            logger.info(f"Using entire dataset for training: {len(train_ds)} patterns (no validation)")
+        else:
+            # Split data into train/validation (80/20 split)
+            total_size = len(data)
+            train_size = int(0.8 * total_size)
+            val_size = total_size - train_size
+            
+            # Create indices for splitting
+            indices = torch.randperm(total_size)
+            train_indices = indices[:train_size]
+            val_indices = indices[train_size:]
+            
+            train_data = data[train_indices]
+            val_data = data[val_indices]
+            
+            train_ds = TensorDataset(train_data)
+            val_ds = TensorDataset(val_data)
+            
+            logger.info(f"Created train/val split: {len(train_ds)} train, {len(val_ds)} validation")
     
     # Create data loaders
     train_dl = DataLoader(train_ds, batch_size=args.batch, shuffle=True, 
                          num_workers=args.num_workers, pin_memory=args.pin_memory,
                          persistent_workers=args.persistent_workers)
-    val_dl = DataLoader(val_ds, batch_size=args.batch, shuffle=False, 
-                       num_workers=args.num_workers, pin_memory=args.pin_memory,
-                       persistent_workers=args.persistent_workers)
+    
+    if val_ds is not None:
+        val_dl = DataLoader(val_ds, batch_size=args.batch, shuffle=False, 
+                           num_workers=args.num_workers, pin_memory=args.pin_memory,
+                           persistent_workers=args.persistent_workers)
+    else:
+        val_dl = None
 
     model = LitAE(args.latent, args.lr, args.realtime_metrics, 
                   args.lambda_act, args.lambda_sim, args.lambda_div,
@@ -300,14 +372,26 @@ def main():
         enable_progress_bar=True,
     )
 
-    trainer.fit(model, train_dl, val_dl)
+    # Start training
+    logger.info("Starting model training...")
+    if val_dl is not None:
+        trainer.fit(model, train_dl, val_dl)
+    else:
+        logger.info("Training without validation - using entire dataset")
+        trainer.fit(model, train_dl)
+    
+    # Record training completion time
+    training_end_time = datetime.datetime.now()
+    training_duration = training_end_time - start_time
+    logger.info(f"Training completed at: {training_end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Training duration: {training_duration}")
 
     # ---------- checkpoint ----------
     out_dir = args.output_dir
     out_dir.mkdir(exist_ok=True)
     ckpt = out_dir / "ae.ckpt"
     trainer.save_checkpoint(ckpt)
-    print(f"Model saved to {ckpt}")
+    logger.info(f"Model saved to {ckpt}")
 
     # ---------- loss curve ----------
     loss_curve_path = args.output_dir / "loss_curve.png"
@@ -318,48 +402,69 @@ def main():
     plt.yscale("log")
     plt.tight_layout()
     plt.savefig(loss_curve_path, dpi=300)
-    print(f"Loss curve saved to {loss_curve_path}")
+    logger.info(f"Loss curve saved to {loss_curve_path}")
     
     # ---------- final evaluation ----------
-    print("\n" + "="*80)
-    print("FINAL MODEL EVALUATION")
-    print("="*80)
+    logger.info("="*60)
+    logger.info("FINAL MODEL EVALUATION")
+    logger.info("="*60)
     
     model.eval()
     # Ensure model is on the correct device
     model = model.to(args.device)
     
     with torch.no_grad():
-        # Evaluate on a batch from validation set
-        val_sample = next(iter(val_dl))
-        if isinstance(val_sample, (list, tuple)):
-            val_sample = val_sample[0]
-        val_input = val_sample.to(args.device)
-        val_output = model(val_input)
+        # Evaluate on a batch from validation set (or training set if no validation)
+        if val_dl is not None:
+            eval_sample = next(iter(val_dl))
+            eval_name = "Validation"
+        else:
+            eval_sample = next(iter(train_dl))
+            eval_name = "Training"
+            
+        if isinstance(eval_sample, (list, tuple)):
+            eval_sample = eval_sample[0]
+        eval_input = eval_sample.to(args.device)
+        eval_output = model(eval_input)
         
-        final_metrics = calculate_metrics(val_input, val_output)
-        print(f"Validation MSE:     {final_metrics['mse']:.6f} ± {final_metrics['mse_std']:.6f}")
-        print(f"Validation PSNR:    {final_metrics['psnr']:.2f} ± {final_metrics['psnr_std']:.2f} dB")
-        print(f"Validation SSIM:    {final_metrics['ssim']:.4f} ± {final_metrics['ssim_std']:.4f}")
+        final_metrics = calculate_metrics(eval_input, eval_output)
+        logger.info(f"{eval_name} MSE:     {final_metrics['mse']:.6f} ± {final_metrics['mse_std']:.6f}")
+        logger.info(f"{eval_name} PSNR:    {final_metrics['psnr']:.2f} ± {final_metrics['psnr_std']:.2f} dB")
+        logger.info(f"{eval_name} SSIM:    {final_metrics['ssim']:.4f} ± {final_metrics['ssim_std']:.4f}")
         
         # Save final comparison images
         from models.summary import save_comparison_images
         final_comparison_path = args.output_dir / "final_reconstruction_comparison.png"
-        save_comparison_images(val_input, val_output, final_comparison_path, num_samples=8)
-        print(f"Final comparison saved to {final_comparison_path}")
+        save_comparison_images(eval_input, eval_output, final_comparison_path, num_samples=8)
+        logger.info(f"Final comparison saved to {final_comparison_path}")
         
         # Print CUDA memory usage stats
         if args.device == "cuda":
-            print(f"\nCUDA Memory Usage:")
-            print(f"  Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-            print(f"  Cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
-            print(f"  Max allocated: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
+            logger.info("CUDA Memory Usage:")
+            logger.info(f"  Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+            logger.info(f"  Cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+            logger.info(f"  Max allocated: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
     
-    print("="*80)
+    # Record end time and final summary
+    end_time = datetime.datetime.now()
+    total_duration = end_time - start_time
+    
+    logger.info("="*60)
+    logger.info("TRAINING COMPLETED SUCCESSFULLY")
+    logger.info("="*60)
+    logger.info(f"Script started at:  {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Script ended at:    {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Total duration:     {total_duration}")
+    logger.info(f"Training duration:  {training_duration}")
+    logger.info("="*60)
     
     # Final cleanup
     if args.device == "cuda":
         torch.cuda.empty_cache()
+
+    # Ensure all logs are flushed
+    for handler in logger.handlers:
+        handler.flush()
 
 if __name__ == "__main__":
     main()
