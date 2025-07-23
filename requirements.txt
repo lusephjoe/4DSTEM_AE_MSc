@@ -14,7 +14,8 @@ plotly~=6.2.0
 scikit-image
 pandas
 seaborn
-zarr~=2.0.0
+zarr~=2.18.0
+numcodecs~=0.12.0
 
 # dev
 pytest
