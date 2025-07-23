@@ -1,6 +1,7 @@
 """Train the autoencoder using PyTorch Lightning."""
 import argparse, torch, pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.callbacks import ModelCheckpoint
 import numpy as np
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, TensorDataset, Dataset
@@ -14,47 +15,34 @@ import json
 import datetime
 import logging
 
-def setup_logging(output_dir: Path, args) -> logging.Logger:
-    """Set up logging to both console and file."""
-    # Create output directory if it doesn't exist
+def setup_logging(output_dir: Path, args, timestamp: str) -> logging.Logger:
+    """Set up logging to both console and file with standardized naming."""
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create log file with timestamp
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Use consistent timestamp for all files in this training run
     log_file = output_dir / f"training_log_{timestamp}.txt"
     
-    # Create logger
     logger = logging.getLogger('training')
     logger.setLevel(logging.INFO)
+    logger.handlers.clear()  # Clear existing handlers
     
-    # Clear any existing handlers
-    logger.handlers = []
-    
-    # Create formatters
-    file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    console_formatter = logging.Formatter('%(levelname)s - %(message)s')
-    
-    # File handler
+    # Add file and console handlers
     file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(file_formatter)
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     
-    # Console handler
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(console_formatter)
+    console_handler.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
     
-    # Add handlers to logger
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
     
-    # Log initial configuration
-    logger.info("="*60)
-    logger.info("4D-STEM AUTOENCODER TRAINING LOG")
-    logger.info("="*60)
+    # Log session header
+    logger.info("=" * 60)
+    logger.info("4D-STEM AUTOENCODER TRAINING SESSION")
+    logger.info("=" * 60)
     logger.info(f"Log file: {log_file}")
-    logger.info(f"Training arguments: {vars(args)}")
-    logger.info("="*60)
+    logger.info(f"Arguments: {vars(args)}")
+    logger.info("=" * 60)
     
     return logger
 
@@ -65,66 +53,54 @@ class ZarrDataset(Dataset):
         self.zarr_path = Path(zarr_path)
         self.arr = zarr.open(str(zarr_path), mode="r")
         
-        # Load metadata if available
-        if metadata_path is None:
-            metadata_path = self.zarr_path.parent / f"{self.zarr_path.stem}_metadata.json"
+        # Load metadata with fallback defaults
+        metadata_path = metadata_path or self.zarr_path.parent / f"{self.zarr_path.stem}_metadata.json"
+        self.metadata = self._load_metadata(metadata_path)
         
+        print(f"Loaded zarr dataset: {self.arr.shape} patterns, dtype: {self.metadata['dtype']}")
+        print(f"Data range: {self.metadata['data_min']:.3f} to {self.metadata['data_min'] + self.metadata['data_range']:.3f}")
+    
+    def _load_metadata(self, metadata_path):
+        """Load metadata with default fallback."""
         if metadata_path.exists():
             with open(metadata_path, 'r') as f:
-                self.metadata = json.load(f)
-        else:
-            # Default metadata if not found
-            self.metadata = {
-                "data_min": 0.0,
-                "data_max": 1.0,
-                "data_range": 1.0,
-                "dtype": "uint16"
-            }
-            print(f"Warning: No metadata found at {metadata_path}, using defaults")
+                return json.load(f)
         
-        self.data_min = self.metadata["data_min"]
-        self.data_range = self.metadata["data_range"]
-        self.dtype = self.metadata["dtype"]
-        
-        print(f"Loaded zarr dataset: {self.arr.shape} patterns, dtype: {self.dtype}")
-        print(f"Data range: {self.data_min:.3f} to {self.data_min + self.data_range:.3f}")
+        print(f"Warning: No metadata found at {metadata_path}, using defaults")
+        return {"data_min": 0.0, "data_max": 1.0, "data_range": 1.0, "dtype": "uint16"}
     
     def __len__(self):
         return self.arr.shape[0]
     
     def __getitem__(self, idx):
-        # Convert PyTorch tensor indices to numpy/python integers
+        # Convert tensor indices and load pattern
         if torch.is_tensor(idx):
             idx = idx.item()
         
-        # Load pattern from zarr
-        pattern = self.arr[idx]
-        
-        # Convert to numpy array first, then to tensor
-        if not isinstance(pattern, np.ndarray):
-            pattern = np.array(pattern)
-        
-        # Convert to tensor
+        pattern = np.array(self.arr[idx]) if not isinstance(self.arr[idx], np.ndarray) else self.arr[idx]
         x = torch.from_numpy(pattern).float()
         
-        # Dequantize if needed
-        if self.dtype == "uint16":
-            # Convert uint16 back to original range
-            x = x / 65535.0 * self.data_range + self.data_min
-        elif self.dtype == "float16":
-            # Already in original range, just convert to float32
-            x = x.float()
-        # float32 is already ready to use
+        # Apply dequantization based on data type
+        x = self._dequantize(x)
         
-        # Apply normalization (log scaling + z-score normalization)
-        x = torch.log(x + 1e-6)  # Log scaling with small epsilon
-        x = (x - x.mean()) / (x.std() + 1e-8)  # Z-score normalization
+        # Apply normalization (log scaling + z-score)
+        x = torch.log(x + 1e-6)
+        x = (x - x.mean()) / (x.std() + 1e-8)
         
-        # Add channel dimension if needed
+        # Ensure channel dimension
         if x.dim() == 2:
             x = x.unsqueeze(0)
         
-        return (x,)  # Return as tuple to match TensorDataset format
+        return (x,)
+    
+    def _dequantize(self, x):
+        """Apply dequantization based on stored data type."""
+        dtype = self.metadata["dtype"]
+        if dtype == "uint16":
+            return x / 65535.0 * self.metadata["data_range"] + self.metadata["data_min"]
+        elif dtype == "float16":
+            return x.float()
+        return x  # float32 already ready
 
 class LitAE(pl.LightningModule):
     def __init__(self, latent_dim: int, lr: float, realtime_metrics: bool = False, 
@@ -196,6 +172,249 @@ class LitAE(pl.LightningModule):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
 
 
+def load_dataset(data_path, logger):
+    """Load dataset and detect input size."""
+    if data_path.suffix == '.zarr' or data_path.is_dir():
+        logger.info(f"Loading zarr dataset from: {data_path}")
+        dataset = ZarrDataset(data_path)
+        sample = dataset[0][0] if isinstance(dataset[0], tuple) else dataset[0]
+        detected_size = sample.shape[-1]
+    else:
+        logger.info(f"Loading tensor dataset from: {data_path}")
+        data = torch.load(data_path)
+        dataset = TensorDataset(data)
+        detected_size = data.shape[-1] if len(data.shape) == 4 else 256
+    
+    logger.info(f"Detected input size: {detected_size}x{detected_size}")
+    return dataset, detected_size
+
+def create_train_val_split(full_dataset, no_validation, logger):
+    """Create train/validation split."""
+    if no_validation:
+        logger.info(f"Using entire dataset for training: {len(full_dataset)} patterns (no validation)")
+        return full_dataset, None
+    
+    # 80/20 train/validation split
+    total_size = len(full_dataset)
+    train_size = int(0.8 * total_size)
+    indices = torch.randperm(total_size)
+    
+    if isinstance(full_dataset, TensorDataset):
+        # Split tensor data directly
+        data = full_dataset.tensors[0]
+        train_data = data[indices[:train_size]]
+        val_data = data[indices[train_size:]]
+        train_ds, val_ds = TensorDataset(train_data), TensorDataset(val_data)
+    else:
+        # Use Subset for zarr datasets
+        from torch.utils.data import Subset
+        train_ds = Subset(full_dataset, indices[:train_size])
+        val_ds = Subset(full_dataset, indices[train_size:])
+    
+    logger.info(f"Created train/val split: {len(train_ds)} train, {len(val_ds)} validation")
+    return train_ds, val_ds
+
+def create_data_loaders(train_ds, val_ds, args):
+    """Create training and validation data loaders."""
+    dataloader_kwargs = {
+        'batch_size': args.batch,
+        'num_workers': args.num_workers,
+        'pin_memory': args.pin_memory,
+        'persistent_workers': args.persistent_workers
+    }
+    
+    train_dl = DataLoader(train_ds, shuffle=True, **dataloader_kwargs)
+    val_dl = DataLoader(val_ds, shuffle=False, **dataloader_kwargs) if val_ds else None
+    
+    return train_dl, val_dl
+
+def create_model(args, detected_size):
+    """Create the autoencoder model."""
+    return LitAE(
+        args.latent, args.lr, args.realtime_metrics,
+        args.lambda_act, args.lambda_sim, args.lambda_div,
+        (detected_size, detected_size)
+    )
+
+def generate_model_summary(model, train_dl, args):
+    """Generate model summary."""
+    sample = next(iter(train_dl))
+    if isinstance(sample, (list, tuple)):
+        sample = sample[0]
+    example = sample[:1].to(args.device)
+    model = model.to(args.device)
+    show(model, example_input=example, output_dir=args.output_dir, include_evaluation=False)
+
+def setup_trainer(args, base_name):
+    """Setup PyTorch Lightning trainer with epoch checkpointing."""
+    tb_logger = TensorBoardLogger(
+        save_dir=args.output_dir,
+        name="tb_logs",
+        default_hp_metric=False
+    )
+    
+    # Setup checkpoint callback to save every N epochs
+    checkpoint_dir = args.output_dir / "checkpoints"
+    
+    if args.no_validation:
+        # Monitor training loss when no validation
+        filename_pattern = f"{base_name}_epoch{{epoch:03d}}_trainloss{{train_loss:.4f}}"
+        monitor_metric = "train_loss"
+    else:
+        # Monitor validation loss when available
+        filename_pattern = f"{base_name}_epoch{{epoch:03d}}_valloss{{val_loss:.4f}}"
+        monitor_metric = "val_loss"
+    
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=checkpoint_dir,
+        filename=filename_pattern,
+        save_top_k=-1,  # Save all checkpoints
+        every_n_epochs=getattr(args, 'save_every_n_epochs', 1),
+        save_on_train_epoch_end=args.no_validation,  # Save after training if no validation
+        monitor=monitor_metric,
+        mode="min"
+    )
+    
+    # Configure accelerator
+    if args.device == "cuda":
+        accelerator, devices = "gpu", args.gpus
+    elif args.device == "mps":
+        accelerator, devices = "mps", 1
+    else:
+        accelerator, devices = "cpu", 1
+    
+    return pl.Trainer(
+        max_epochs=args.epochs,
+        accelerator=accelerator,
+        devices=devices,
+        logger=tb_logger,
+        enable_progress_bar=True,
+        callbacks=[checkpoint_callback]
+    )
+
+def train_model(trainer, model, train_dl, val_dl, logger, start_time):
+    """Train the model and return training duration."""
+    logger.info("Starting model training...")
+    if val_dl is not None:
+        trainer.fit(model, train_dl, val_dl)
+    else:
+        logger.info("Training without validation - using entire dataset")
+        trainer.fit(model, train_dl)
+    
+    training_end_time = datetime.datetime.now()
+    training_duration = training_end_time - start_time
+    logger.info(f"Training completed at: {training_end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Training duration: {training_duration}")
+    return training_duration
+
+def save_model_and_results(trainer, model, args, logger, base_name):
+    """Save final model checkpoint and loss curve with standardized naming."""
+    args.output_dir.mkdir(exist_ok=True)
+    
+    # Generate final filename with MSE included
+    final_mse = model.train_losses[-1] if model.train_losses else 0.0
+    final_base_name = f"{base_name}_mse{final_mse:.4f}"
+    
+    # Save final checkpoint (in addition to epoch checkpoints)
+    final_ckpt_path = args.output_dir / f"{final_base_name}_final.ckpt"
+    trainer.save_checkpoint(final_ckpt_path)
+    logger.info(f"Final model saved to {final_ckpt_path}")
+    
+    # Save loss curve
+    loss_curve_path = args.output_dir / f"{final_base_name}_loss.png"
+    plt.figure()
+    plt.plot(model.train_losses)
+    plt.xlabel("batch")
+    plt.ylabel("MSE loss")
+    plt.yscale("log")
+    plt.title(f"Training Loss (Final MSE: {final_mse:.4f})")
+    plt.tight_layout()
+    plt.savefig(loss_curve_path, dpi=300)
+    plt.close()
+    logger.info(f"Loss curve saved to {loss_curve_path}")
+    
+    # Log information about epoch checkpoints
+    checkpoint_dir = args.output_dir / "checkpoints"
+    if checkpoint_dir.exists():
+        epoch_checkpoints = list(checkpoint_dir.glob(f"{base_name}_epoch*.ckpt"))
+        logger.info(f"Epoch checkpoints saved: {len(epoch_checkpoints)} files in {checkpoint_dir}")
+    
+    return final_base_name  # Return for use in other saves
+
+def perform_final_evaluation(model, train_dl, val_dl, args, logger, base_name):
+    """Perform final model evaluation with standardized naming."""
+    logger.info("="*60)
+    logger.info("FINAL MODEL EVALUATION")
+    logger.info("="*60)
+    
+    model.eval()
+    model = model.to(args.device)
+    
+    with torch.no_grad():
+        # Get evaluation data
+        if val_dl is not None:
+            eval_sample = next(iter(val_dl))
+            eval_name = "Validation"
+        else:
+            eval_sample = next(iter(train_dl))
+            eval_name = "Training"
+        
+        if isinstance(eval_sample, (list, tuple)):
+            eval_sample = eval_sample[0]
+        
+        eval_input = eval_sample.to(args.device)
+        eval_output = model(eval_input)
+        
+        # Calculate and log metrics
+        final_metrics = calculate_metrics(eval_input, eval_output)
+        logger.info(f"{eval_name} MSE:     {final_metrics['mse']:.6f} ± {final_metrics['mse_std']:.6f}")
+        logger.info(f"{eval_name} PSNR:    {final_metrics['psnr']:.2f} ± {final_metrics['psnr_std']:.2f} dB")
+        logger.info(f"{eval_name} SSIM:    {final_metrics['ssim']:.4f} ± {final_metrics['ssim_std']:.4f}")
+        
+        # Save comparison images with standardized naming
+        from models.summary import save_comparison_images
+        final_comparison_path = args.output_dir / f"{base_name}_reconstruction.png"
+        save_comparison_images(eval_input, eval_output, final_comparison_path, num_samples=8)
+        logger.info(f"Final comparison saved to {final_comparison_path}")
+        
+        # Log memory usage
+        if args.device == "cuda":
+            logger.info("CUDA Memory Usage:")
+            logger.info(f"  Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+            logger.info(f"  Cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+            logger.info(f"  Max allocated: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
+
+def finalize_training(logger, start_time, training_duration, args):
+    """Log final summary and cleanup."""
+    end_time = datetime.datetime.now()
+    total_duration = end_time - start_time
+    
+    logger.info("="*60)
+    logger.info("TRAINING COMPLETED SUCCESSFULLY")
+    logger.info("="*60)
+    logger.info(f"Script started at:  {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Script ended at:    {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Total duration:     {total_duration}")
+    logger.info(f"Training duration:  {training_duration}")
+    
+    # Summary of saved files
+    checkpoint_dir = args.output_dir / "checkpoints"
+    if checkpoint_dir.exists():
+        epoch_checkpoints = list(checkpoint_dir.glob("*.ckpt"))
+        logger.info(f"Epoch checkpoints:  {len(epoch_checkpoints)} files saved")
+    
+    final_checkpoints = list(args.output_dir.glob("*_final.ckpt"))
+    logger.info(f"Final checkpoint:   {len(final_checkpoints)} file saved")
+    
+    logger.info("="*60)
+    
+    # Cleanup
+    if args.device == "cuda":
+        torch.cuda.empty_cache()
+    
+    for handler in logger.handlers:
+        handler.flush()
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--data", type=Path, required=True)
@@ -220,11 +439,13 @@ def main():
     p.add_argument("--persistent_workers", action="store_true", help="Keep workers alive between epochs")
     p.add_argument("--profile", action="store_true", help="Enable PyTorch profiler for performance analysis")
     p.add_argument("--no_validation", action="store_true", help="Disable train/validation split - use entire dataset for training")
+    p.add_argument("--save_every_n_epochs", type=int, default=1, help="Save checkpoint every N epochs (default: 1)")
 
     args = p.parse_args()
 
-    # Set up logging
-    logger = setup_logging(args.output_dir, args)
+    # Set up logging with standardized naming
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    logger = setup_logging(args.output_dir, args, timestamp)
     
     # Record start time
     start_time = datetime.datetime.now()
@@ -244,227 +465,31 @@ def main():
     
     pl.seed_everything(args.seed)
 
-    # Detect file format and load data accordingly
+    # Load data and create datasets
     data_path = Path(args.data)
+    full_dataset, detected_size = load_dataset(data_path, logger)
+    train_ds, val_ds = create_train_val_split(full_dataset, args.no_validation, logger)
     
-    if data_path.suffix == '.zarr' or data_path.is_dir():
-        # Handle zarr format
-        logger.info(f"Loading zarr dataset from: {data_path}")
-        full_dataset = ZarrDataset(data_path)
-        
-        # Get sample to detect input size
-        sample = full_dataset[0]
-        # Handle tuple format from ZarrDataset
-        if isinstance(sample, tuple):
-            sample = sample[0]
-        detected_size = sample.shape[-1]  # Assume square images
-        logger.info(f"Detected input size: {detected_size}x{detected_size}")
-        
-        if args.no_validation:
-            # Use entire dataset for training
-            train_ds = full_dataset
-            val_ds = None
-            logger.info(f"Using entire dataset for training: {len(train_ds)} patterns (no validation)")
-        else:
-            # Split dataset indices for train/validation (80/20 split)
-            total_size = len(full_dataset)
-            train_size = int(0.8 * total_size)
-            val_size = total_size - train_size
-            
-            # Create indices for splitting
-            indices = torch.randperm(total_size)
-            train_indices = indices[:train_size]
-            val_indices = indices[train_size:]
-            
-            # Create subset datasets
-            from torch.utils.data import Subset
-            train_ds = Subset(full_dataset, train_indices)
-            val_ds = Subset(full_dataset, val_indices)
-            
-            logger.info(f"Created train/val split: {len(train_ds)} train, {len(val_ds)} validation")
-        
-    else:
-        # Handle traditional .pt format
-        logger.info(f"Loading tensor dataset from: {data_path}")
-        data = torch.load(args.data)
-        
-        # Detect input size from data
-        if len(data.shape) == 4:  # (N, C, H, W)
-            detected_size = data.shape[-1]  # Assume square images
-        else:
-            detected_size = args.input_size
-        
-        logger.info(f"Detected input size: {detected_size}x{detected_size}")
-        
-        if args.no_validation:
-            # Use entire dataset for training
-            train_ds = TensorDataset(data)
-            val_ds = None
-            logger.info(f"Using entire dataset for training: {len(train_ds)} patterns (no validation)")
-        else:
-            # Split data into train/validation (80/20 split)
-            total_size = len(data)
-            train_size = int(0.8 * total_size)
-            val_size = total_size - train_size
-            
-            # Create indices for splitting
-            indices = torch.randperm(total_size)
-            train_indices = indices[:train_size]
-            val_indices = indices[train_size:]
-            
-            train_data = data[train_indices]
-            val_data = data[val_indices]
-            
-            train_ds = TensorDataset(train_data)
-            val_ds = TensorDataset(val_data)
-            
-            logger.info(f"Created train/val split: {len(train_ds)} train, {len(val_ds)} validation")
+    # Create data loaders and model
+    train_dl, val_dl = create_data_loaders(train_ds, val_ds, args)
+    model = create_model(args, detected_size)
     
-    # Create data loaders
-    train_dl = DataLoader(train_ds, batch_size=args.batch, shuffle=True, 
-                         num_workers=args.num_workers, pin_memory=args.pin_memory,
-                         persistent_workers=args.persistent_workers)
-    
-    if val_ds is not None:
-        val_dl = DataLoader(val_ds, batch_size=args.batch, shuffle=False, 
-                           num_workers=args.num_workers, pin_memory=args.pin_memory,
-                           persistent_workers=args.persistent_workers)
-    else:
-        val_dl = None
+    if args.summary:
+        generate_model_summary(model, train_dl, args)
 
-    model = LitAE(args.latent, args.lr, args.realtime_metrics, 
-                  args.lambda_act, args.lambda_sim, args.lambda_div,
-                  (detected_size, detected_size))
+    # Generate base name for consistent naming across all files
+    timestamp = datetime.datetime.now().strftime("%m%d_%H%M")
+    base_name = f"ae_e{args.epochs:03d}_{timestamp}"
+    logger.info(f"Base filename: {base_name}")
     
-    if args.summary:          
-                                    # grab one batch to build an example tensor
-        sample = next(iter(train_dl))
-        if isinstance(sample, (list, tuple)):
-            sample = sample[0]    
-        example = sample[:1].to(args.device)
-        # Ensure model is on the correct device for summary
-        model = model.to(args.device)
-        show(model, example_input=example, output_dir=args.output_dir, include_evaluation=False)
+    # Setup trainer with epoch checkpointing
+    trainer = setup_trainer(args, base_name)
 
-        # ---------- logging ----------
-    tb_logger = TensorBoardLogger(
-        save_dir=args.output_dir,
-        name="tb_logs",
-        default_hp_metric=False,
-    )
-
-    # Configure trainer accelerator based on device
-    if args.device == "cuda":
-        accelerator = "gpu"
-        devices = args.gpus
-    elif args.device == "mps":
-        accelerator = "mps"
-        devices = 1
-    else:
-        accelerator = "cpu"
-        devices = 1
-    
-    trainer = pl.Trainer(
-        max_epochs=args.epochs,
-        accelerator=accelerator,
-        devices=devices,
-        logger=tb_logger,                 
-        enable_progress_bar=True,
-    )
-
-    # Start training
-    logger.info("Starting model training...")
-    if val_dl is not None:
-        trainer.fit(model, train_dl, val_dl)
-    else:
-        logger.info("Training without validation - using entire dataset")
-        trainer.fit(model, train_dl)
-    
-    # Record training completion time
-    training_end_time = datetime.datetime.now()
-    training_duration = training_end_time - start_time
-    logger.info(f"Training completed at: {training_end_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"Training duration: {training_duration}")
-
-    # ---------- checkpoint ----------
-    out_dir = args.output_dir
-    out_dir.mkdir(exist_ok=True)
-    ckpt = out_dir / "ae.ckpt"
-    trainer.save_checkpoint(ckpt)
-    logger.info(f"Model saved to {ckpt}")
-
-    # ---------- loss curve ----------
-    loss_curve_path = args.output_dir / "loss_curve.png"
-    plt.figure()
-    plt.plot(model.train_losses)
-    plt.xlabel("batch")
-    plt.ylabel("MSE loss")
-    plt.yscale("log")
-    plt.tight_layout()
-    plt.savefig(loss_curve_path, dpi=300)
-    logger.info(f"Loss curve saved to {loss_curve_path}")
-    
-    # ---------- final evaluation ----------
-    logger.info("="*60)
-    logger.info("FINAL MODEL EVALUATION")
-    logger.info("="*60)
-    
-    model.eval()
-    # Ensure model is on the correct device
-    model = model.to(args.device)
-    
-    with torch.no_grad():
-        # Evaluate on a batch from validation set (or training set if no validation)
-        if val_dl is not None:
-            eval_sample = next(iter(val_dl))
-            eval_name = "Validation"
-        else:
-            eval_sample = next(iter(train_dl))
-            eval_name = "Training"
-            
-        if isinstance(eval_sample, (list, tuple)):
-            eval_sample = eval_sample[0]
-        eval_input = eval_sample.to(args.device)
-        eval_output = model(eval_input)
-        
-        final_metrics = calculate_metrics(eval_input, eval_output)
-        logger.info(f"{eval_name} MSE:     {final_metrics['mse']:.6f} ± {final_metrics['mse_std']:.6f}")
-        logger.info(f"{eval_name} PSNR:    {final_metrics['psnr']:.2f} ± {final_metrics['psnr_std']:.2f} dB")
-        logger.info(f"{eval_name} SSIM:    {final_metrics['ssim']:.4f} ± {final_metrics['ssim_std']:.4f}")
-        
-        # Save final comparison images
-        from models.summary import save_comparison_images
-        final_comparison_path = args.output_dir / "final_reconstruction_comparison.png"
-        save_comparison_images(eval_input, eval_output, final_comparison_path, num_samples=8)
-        logger.info(f"Final comparison saved to {final_comparison_path}")
-        
-        # Print CUDA memory usage stats
-        if args.device == "cuda":
-            logger.info("CUDA Memory Usage:")
-            logger.info(f"  Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-            logger.info(f"  Cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
-            logger.info(f"  Max allocated: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
-    
-    # Record end time and final summary
-    end_time = datetime.datetime.now()
-    total_duration = end_time - start_time
-    
-    logger.info("="*60)
-    logger.info("TRAINING COMPLETED SUCCESSFULLY")
-    logger.info("="*60)
-    logger.info(f"Script started at:  {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"Script ended at:    {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"Total duration:     {total_duration}")
-    logger.info(f"Training duration:  {training_duration}")
-    logger.info("="*60)
-    
-    # Final cleanup
-    if args.device == "cuda":
-        torch.cuda.empty_cache()
-
-    # Ensure all logs are flushed
-    for handler in logger.handlers:
-        handler.flush()
+    # Train model and complete workflow
+    training_duration = train_model(trainer, model, train_dl, val_dl, logger, start_time)
+    final_base_name = save_model_and_results(trainer, model, args, logger, base_name)
+    perform_final_evaluation(model, train_dl, val_dl, args, logger, final_base_name)
+    finalize_training(logger, start_time, training_duration, args)
 
 if __name__ == "__main__":
     main()
