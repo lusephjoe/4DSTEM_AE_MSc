@@ -314,7 +314,7 @@ def create_train_val_split(full_dataset, no_validation, logger):
 def create_data_loaders(train_ds, val_ds, args):
     """Create optimized training and validation data loaders."""
     # Reduce workers to prevent log duplication - use fewer workers for cleaner output
-    num_workers = min(4, args.num_workers)  # Reduce workers to minimize log spam
+    num_workers = min(16, args.num_workers)  # Reduce workers to minimize log spam
     
     dataloader_kwargs = {
         'batch_size': args.batch,
@@ -386,6 +386,14 @@ def setup_trainer(args, base_name):
     else:
         accelerator, devices = "cpu", 1
     
+    # Map precision argument to PyTorch Lightning format
+    precision_map = {
+        "32": "32-true",
+        "16": "16-mixed", 
+        "bf16": "bf16-mixed"
+    }
+    precision = precision_map.get(args.precision, "16-mixed")
+    
     return pl.Trainer(
         max_epochs=args.epochs,
         accelerator=accelerator,
@@ -393,21 +401,25 @@ def setup_trainer(args, base_name):
         logger=tb_logger,
         enable_progress_bar=True,
         callbacks=[checkpoint_callback],
-        precision="16-mixed",
+        precision=precision,
         gradient_clip_val=1.0,
         accumulate_grad_batches=args.accumulate_grad_batches,
         log_every_n_steps=50,  # Reduce logging frequency
         enable_model_summary=False  # Disable model summary to reduce output
     )
 
-def train_model(trainer, model, train_dl, val_dl, logger, start_time):
+def train_model(trainer, model, train_dl, val_dl, logger, start_time, resume_checkpoint=None):
     """Train the model and return training duration."""
-    logger.info("Starting model training...")
+    if resume_checkpoint:
+        logger.info(f"Resuming training from checkpoint: {resume_checkpoint}")
+    else:
+        logger.info("Starting model training...")
+    
     if val_dl is not None:
-        trainer.fit(model, train_dl, val_dl)
+        trainer.fit(model, train_dl, val_dl, ckpt_path=resume_checkpoint)
     else:
         logger.info("Training without validation - using entire dataset")
-        trainer.fit(model, train_dl)
+        trainer.fit(model, train_dl, ckpt_path=resume_checkpoint)
     
     training_end_time = datetime.datetime.now()
     training_duration = training_end_time - start_time
@@ -549,6 +561,7 @@ def main():
     p.add_argument("--no_validation", action="store_true", help="Disable train/validation split - use entire dataset for training")
     p.add_argument("--save_every_n_epochs", type=int, default=1, help="Save checkpoint every N epochs (default: 1)")
     p.add_argument("--accumulate_grad_batches", type=int, default=1, help="Number of batches to accumulate gradients over (default: 1)")
+    p.add_argument("--resume_from_checkpoint", type=Path, default=None, help="Path to checkpoint file to resume training from")
 
     args = p.parse_args()
 
@@ -591,11 +604,21 @@ def main():
     base_name = f"ae_e{args.epochs:03d}_{timestamp}"
     logger.info(f"Base filename: {base_name}")
     
+    # Validate checkpoint path if provided
+    resume_checkpoint = None
+    if args.resume_from_checkpoint:
+        if args.resume_from_checkpoint.exists():
+            resume_checkpoint = str(args.resume_from_checkpoint)
+            logger.info(f"Checkpoint found: {resume_checkpoint}")
+        else:
+            logger.error(f"Checkpoint file not found: {args.resume_from_checkpoint}")
+            return
+    
     # Setup trainer with epoch checkpointing
     trainer = setup_trainer(args, base_name)
 
     # Train model and complete workflow
-    training_duration = train_model(trainer, model, train_dl, val_dl, logger, start_time)
+    training_duration = train_model(trainer, model, train_dl, val_dl, logger, start_time, resume_checkpoint)
     final_base_name = save_model_and_results(trainer, model, args, logger, base_name)
     perform_final_evaluation(model, train_dl, val_dl, args, logger, final_base_name)
     finalize_training(logger, start_time, training_duration, args)
