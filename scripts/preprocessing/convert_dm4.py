@@ -233,21 +233,32 @@ def main():
     print("Saving data to zarr...")
     print("Note: This operation may take several minutes without progress updates")
     
-    # Create zarr array manually to avoid chunking conflicts
+    # Force zarr v2 for compatibility and use simple approach
+    import zarr.storage
+    
     compressor = numcodecs.Blosc(cname="zstd", 
                                 clevel=args.compression_level, 
                                 shuffle=numcodecs.Blosc.BITSHUFFLE)
     
-    # Create zarr array with proper chunking
-    z = zarr.open(str(args.output), mode='w', 
-                 shape=processed_data.shape, 
-                 chunks=(args.chunk_size, qy_final, qx_final),
-                 dtype=processed_data.dtype,
-                 compressor=compressor,
-                 zarr_version=2)
+    # Use zarr v2 storage format explicitly
+    store = zarr.storage.DirectoryStore(str(args.output))
     
-    # Store data using da.store which handles irregular chunks properly
-    da.store(processed_data, z, compute=True)
+    # Create zarr v2 array - this forces v2 format which handles chunks better
+    z = zarr.create(shape=processed_data.shape,
+                   chunks=(args.chunk_size, qy_final, qx_final),
+                   dtype=processed_data.dtype,
+                   compressor=compressor,
+                   store=store,
+                   zarr_format=2,
+                   overwrite=True)
+    
+    # Store data chunk by chunk to avoid broadcast issues
+    print(f"Writing {len(processed_data.chunks[0])} chunks...")
+    for i, chunk_size_actual in enumerate(processed_data.chunks[0]):
+        start_idx = sum(processed_data.chunks[0][:i])
+        end_idx = start_idx + chunk_size_actual
+        chunk_data = processed_data[start_idx:end_idx]
+        z[start_idx:end_idx] = chunk_data.compute()
     
     # Save metadata for reconstruction
     metadata = {
