@@ -233,20 +233,17 @@ def main():
     print("Saving data to zarr...")
     print("Note: This operation may take several minutes without progress updates")
     
-    # Rechunk to handle irregular chunk sizes before writing
-    print("Rechunking data for zarr compatibility...")
-    chunk_size = min(128, processed_data.shape[0])  # Use smaller chunk size if needed
-    processed_data = da.rechunk(processed_data, chunks=(chunk_size, processed_data.chunks[1][0], processed_data.chunks[2][0]))
-    
-    # Use da.to_zarr with zarr v2 format for compatibility
+    # Use da.to_zarr with explicit chunking to handle irregular final chunks
     compressor = numcodecs.Blosc(cname="zstd", 
                                 clevel=args.compression_level, 
                                 shuffle=numcodecs.Blosc.BITSHUFFLE)
     
+    # Let zarr handle chunk boundaries automatically
     da.to_zarr(processed_data, str(args.output), 
                compressor=compressor, 
                overwrite=True,
-               zarr_version=2)
+               zarr_version=2,
+               chunk=(args.chunk_size, qy_final, qx_final))
     
     # Save metadata for reconstruction
     metadata = {
