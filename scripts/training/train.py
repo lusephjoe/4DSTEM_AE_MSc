@@ -431,9 +431,12 @@ def save_model_and_results(trainer, model, args, logger, base_name):
     """Save final model checkpoint and loss curve with standardized naming."""
     args.output_dir.mkdir(exist_ok=True)
     
-    # Generate final filename with MSE included
+    # Get current epoch from trainer
+    current_epoch = trainer.current_epoch + 1  # +1 because epochs are 0-indexed
+    
+    # Generate final filename with epoch and MSE included
     final_mse = model.train_losses[-1] if model.train_losses else 0.0
-    final_base_name = f"{base_name}_mse{final_mse:.4f}"
+    final_base_name = f"{base_name}_epoch{current_epoch:03d}_mse{final_mse:.4f}"
     
     # Save final checkpoint (in addition to epoch checkpoints)
     final_ckpt_path = args.output_dir / f"{final_base_name}_final.ckpt"
