@@ -238,12 +238,12 @@ def main():
                                 clevel=args.compression_level, 
                                 shuffle=numcodecs.Blosc.BITSHUFFLE)
     
-    # Let zarr handle chunk boundaries automatically
+    # Let zarr handle chunk boundaries automatically with chunks parameter
     da.to_zarr(processed_data, str(args.output), 
                compressor=compressor, 
                overwrite=True,
                zarr_version=2,
-               chunk=(args.chunk_size, qy_final, qx_final))
+               chunks=(args.chunk_size, qy_final, qx_final))
     
     # Save metadata for reconstruction
     metadata = {
