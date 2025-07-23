@@ -90,10 +90,11 @@ class ZarrDataset(Dataset):
     def _compute_and_save_global_stats(self, stats_path):
         """Compute global log-space statistics once using sampling for speed."""
         # Sample-based estimation for speed (use subset for large datasets)
-        n_samples = min(5000, len(self.arr))
-        print(f"Using {n_samples} samples to estimate global statistics...")
+        total_patterns = self.arr.shape[0]  # Use .shape[0] instead of len() for zarr arrays
+        n_samples = min(5000, total_patterns)
+        print(f"Using {n_samples} samples to estimate global statistics from {total_patterns} total patterns...")
         
-        indices = np.random.choice(len(self.arr), n_samples, replace=False)
+        indices = np.random.choice(total_patterns, n_samples, replace=False)
         
         log_values = []
         for i, idx in enumerate(indices):
