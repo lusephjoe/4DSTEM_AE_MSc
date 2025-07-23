@@ -229,31 +229,18 @@ def main():
     print(f"Saving to zarr format: {args.output}")
     print(f"Compression: Blosc-zstd level {args.compression_level} with bit-shuffle")
     
-    # Save to zarr with compression and progress bar
+    # Save to zarr with compression
     print("Saving data to zarr...")
+    print("Note: This operation may take several minutes without progress updates")
     
-    # Create a progress bar for the zarr writing
-    total_chunks = len(processed_data.chunks[0])
+    # Use da.to_zarr for simpler, more reliable writing
+    compressor = numcodecs.Blosc(cname="zstd", 
+                                clevel=args.compression_level, 
+                                shuffle=numcodecs.Blosc.BITSHUFFLE)
     
-    with tqdm(total=total_chunks, desc="Writing zarr chunks", unit="chunk") as pbar:
-        # Custom progress callback
-        def progress_callback(block_id=None):
-            if block_id is not None:
-                pbar.update(1)
-        
-        # Use store with progress tracking
-        z = zarr.open(str(args.output), mode='w', 
-                     shape=processed_data.shape, 
-                     chunks=processed_data.chunks,
-                     dtype=processed_data.dtype,
-                     compressor=numcodecs.Blosc(cname="zstd", 
-                                              clevel=args.compression_level, 
-                                              shuffle=numcodecs.Blosc.BITSHUFFLE),
-                     zarr_version=2)
-        
-        # Store with progress
-        da.store(processed_data, z, compute=True)
-        pbar.update(total_chunks - pbar.n)  # Ensure we reach 100%
+    da.to_zarr(processed_data, str(args.output), 
+               compressor=compressor, 
+               overwrite=True)
     
     # Save metadata for reconstruction
     metadata = {
