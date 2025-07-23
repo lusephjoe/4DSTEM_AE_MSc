@@ -19,10 +19,84 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 from models.autoencoder import Autoencoder
 from models.summary import calculate_metrics, save_comparison_images
 try:
+    import zarr
+    HAS_ZARR = True
+except ImportError:
+    HAS_ZARR = False
+import json
+try:
     from .stem_visualization import STEMVisualizer
 except ImportError:
     print("Warning: stem_visualization module not found. STEM visualization features unavailable.")
     STEMVisualizer = None
+
+
+class ZarrDataset:
+    """Dataset for lazy loading of zarr-compressed 4D-STEM data."""
+    
+    def __init__(self, zarr_path, metadata_path=None):
+        self.zarr_path = Path(zarr_path)
+        self.arr = zarr.open(str(zarr_path), mode="r")
+        
+        # Load metadata if available
+        if metadata_path is None:
+            metadata_path = self.zarr_path.parent / f"{self.zarr_path.stem}_metadata.json"
+        
+        if metadata_path.exists():
+            with open(metadata_path, 'r') as f:
+                self.metadata = json.load(f)
+        else:
+            # Default metadata if not found
+            self.metadata = {
+                "data_min": 0.0,
+                "data_max": 1.0,
+                "data_range": 1.0,
+                "dtype": "float16"
+            }
+            print(f"Warning: No metadata found at {metadata_path}, using defaults")
+        
+        self.data_min = self.metadata["data_min"]
+        self.data_range = self.metadata["data_range"]
+        self.dtype = self.metadata["dtype"]
+        
+        print(f"Loaded zarr dataset: {self.arr.shape} patterns, dtype: {self.dtype}")
+        print(f"Data range: {self.data_min:.3f} to {self.data_min + self.data_range:.3f}")
+    
+    def __len__(self):
+        return self.arr.shape[0]
+    
+    def __getitem__(self, idx):
+        # Convert PyTorch tensor indices to numpy/python integers
+        if torch.is_tensor(idx):
+            idx = idx.item()
+        
+        # Handle slice objects and lists
+        if isinstance(idx, (slice, list, np.ndarray)):
+            patterns = np.array(self.arr[idx])
+        else:
+            patterns = np.array(self.arr[idx])
+            if patterns.ndim == 2:
+                patterns = patterns[np.newaxis, ...]  # Add batch dimension
+        
+        # Convert to tensor
+        x = torch.from_numpy(patterns).float()
+        
+        # Dequantize if needed
+        if self.dtype == "uint16":
+            # Convert uint16 back to original range
+            x = x / 65535.0 * self.data_range + self.data_min
+        elif self.dtype == "float16":
+            # Already normalized, just convert to float32
+            x = x.float()
+        # float32 is already ready to use
+        
+        # Add channel dimension if needed
+        if x.dim() == 3:  # (batch, height, width)
+            x = x.unsqueeze(1)  # (batch, 1, height, width)
+        elif x.dim() == 2:  # (height, width)
+            x = x.unsqueeze(0).unsqueeze(0)  # (1, 1, height, width)
+        
+        return x
 
 
 class LitAE(pl.LightningModule):
@@ -259,7 +333,7 @@ def main():
     parser.add_argument('--checkpoint', type=str, required=True,
                        help='Path to model checkpoint (.ckpt)')
     parser.add_argument('--data', type=str, required=True,
-                       help='Path to test data (.pt)')
+                       help='Path to test data (.pt or .zarr)')
     parser.add_argument('--output_dir', type=str, default='outputs/reconstruction_results',
                        help='Output directory for results')
     parser.add_argument('--device', type=str, default='auto',
@@ -297,14 +371,43 @@ def main():
         print(f"Error loading model: {e}")
         return
     
-    # Load data
+    # Load data - detect format
+    data_path = Path(args.data)
     print(f"Loading data from {args.data}")
-    data = torch.load(args.data, map_location=device)
     
-    # Take subset of data
-    if len(data) > args.num_samples:
-        indices = torch.randperm(len(data))[:args.num_samples]
-        data = data[indices]
+    if data_path.suffix == '.zarr' or data_path.is_dir():
+        # Handle zarr format
+        if not HAS_ZARR:
+            print("Error: Zarr not installed. Install with: pip install zarr")
+            return
+        
+        print("Loading zarr dataset...")
+        zarr_dataset = ZarrDataset(data_path)
+        
+        # Take subset of data
+        num_samples = min(args.num_samples, len(zarr_dataset))
+        if len(zarr_dataset) > args.num_samples:
+            indices = torch.randperm(len(zarr_dataset))[:num_samples].tolist()
+        else:
+            indices = list(range(len(zarr_dataset)))
+        
+        # Load selected samples
+        data_list = []
+        print(f"Loading {len(indices)} samples...")
+        for i in indices:
+            sample = zarr_dataset[i]
+            data_list.append(sample)
+        
+        data = torch.cat(data_list, dim=0)
+        
+    else:
+        # Handle traditional .pt format
+        data = torch.load(args.data, map_location=device)
+        
+        # Take subset of data
+        if len(data) > args.num_samples:
+            indices = torch.randperm(len(data))[:args.num_samples]
+            data = data[indices]
     
     print(f"Data shape: {data.shape}")
     
