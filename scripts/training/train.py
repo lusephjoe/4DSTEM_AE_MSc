@@ -66,9 +66,13 @@ class ZarrDataset(Dataset):
             # Convert uint16 back to original range
             x = x / 65535.0 * self.data_range + self.data_min
         elif self.dtype == "float16":
-            # Already normalized, just convert to float32
+            # Already in original range, just convert to float32
             x = x.float()
         # float32 is already ready to use
+        
+        # Apply normalization (log scaling + z-score normalization)
+        x = torch.log(x + 1e-6)  # Log scaling with small epsilon
+        x = (x - x.mean()) / (x.std() + 1e-8)  # Z-score normalization
         
         # Add channel dimension if needed
         if x.dim() == 2:
