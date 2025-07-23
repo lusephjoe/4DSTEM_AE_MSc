@@ -47,7 +47,7 @@ def setup_logging(output_dir: Path, args, timestamp: str) -> logging.Logger:
     return logger
 
 class ZarrDataset(Dataset):
-    """Dataset for lazy loading of zarr-compressed 4D-STEM data."""
+    """Optimized dataset for lazy loading of zarr-compressed 4D-STEM data with pre-computed normalization."""
     
     def __init__(self, zarr_path, metadata_path=None):
         self.zarr_path = Path(zarr_path)
@@ -57,8 +57,12 @@ class ZarrDataset(Dataset):
         metadata_path = metadata_path or self.zarr_path.parent / f"{self.zarr_path.stem}_metadata.json"
         self.metadata = self._load_metadata(metadata_path)
         
+        # Load or compute global normalization statistics ONCE
+        self._load_or_compute_global_stats()
+        
         print(f"Loaded zarr dataset: {self.arr.shape} patterns, dtype: {self.metadata['dtype']}")
         print(f"Data range: {self.metadata['data_min']:.3f} to {self.metadata['data_min'] + self.metadata['data_range']:.3f}")
+        print(f"Global normalization: mean={self.global_log_mean:.4f}, std={self.global_log_std:.4f}")
     
     def _load_metadata(self, metadata_path):
         """Load metadata with default fallback."""
@@ -69,23 +73,82 @@ class ZarrDataset(Dataset):
         print(f"Warning: No metadata found at {metadata_path}, using defaults")
         return {"data_min": 0.0, "data_max": 1.0, "data_range": 1.0, "dtype": "uint16"}
     
+    def _load_or_compute_global_stats(self):
+        """Load pre-computed global statistics or compute them once."""
+        stats_path = self.zarr_path.parent / f"{self.zarr_path.stem}_normalization_stats.json"
+        
+        if stats_path.exists():
+            print("Loading pre-computed normalization statistics...")
+            with open(stats_path, 'r') as f:
+                stats = json.load(f)
+                self.global_log_mean = stats['log_mean']
+                self.global_log_std = stats['log_std']
+        else:
+            print("Computing global normalization statistics (one-time cost)...")
+            self._compute_and_save_global_stats(stats_path)
+    
+    def _compute_and_save_global_stats(self, stats_path):
+        """Compute global log-space statistics once using sampling for speed."""
+        # Sample-based estimation for speed (use subset for large datasets)
+        n_samples = min(5000, len(self.arr))
+        print(f"Using {n_samples} samples to estimate global statistics...")
+        
+        indices = np.random.choice(len(self.arr), n_samples, replace=False)
+        
+        log_values = []
+        for i, idx in enumerate(indices):
+            if i % 1000 == 0:
+                print(f"Processing sample {i+1}/{n_samples}...")
+            
+            pattern = np.array(self.arr[idx])
+            
+            # Apply same dequantization as in training
+            if self.metadata["dtype"] == "uint16":
+                pattern = pattern.astype("float32") / 65535.0 * self.metadata["data_range"] + self.metadata["data_min"]
+            elif self.metadata["dtype"] == "float16":
+                pattern = pattern.astype("float32")
+            
+            # Apply log scaling
+            log_pattern = np.log(pattern + 1e-6)
+            log_values.append(log_pattern.flatten())
+        
+        # Combine all samples and compute global statistics
+        print("Computing global mean and std...")
+        all_log_values = np.concatenate(log_values)
+        self.global_log_mean = float(np.mean(all_log_values))
+        self.global_log_std = float(np.std(all_log_values))
+        
+        # Save for future use
+        stats = {
+            'log_mean': self.global_log_mean,
+            'log_std': self.global_log_std,
+            'n_samples_used': n_samples,
+            'computed_on': datetime.datetime.now().isoformat()
+        }
+        
+        with open(stats_path, 'w') as f:
+            json.dump(stats, f, indent=2)
+        
+        print(f"Global stats computed and saved: mean={self.global_log_mean:.4f}, std={self.global_log_std:.4f}")
+    
     def __len__(self):
         return self.arr.shape[0]
     
     def __getitem__(self, idx):
-        # Convert tensor indices and load pattern
+        # OPTIMIZED: Fast path with pre-computed normalization
         if torch.is_tensor(idx):
             idx = idx.item()
         
-        pattern = np.array(self.arr[idx]) if not isinstance(self.arr[idx], np.ndarray) else self.arr[idx]
+        # Direct conversion with minimal copies
+        pattern = np.array(self.arr[idx])
         x = torch.from_numpy(pattern).float()
         
-        # Apply dequantization based on data type
-        x = self._dequantize(x)
+        # Apply dequantization (cached from init)
+        x = self._dequantize_fast(x)
         
-        # Apply normalization (log scaling + z-score)
+        # Apply PRE-COMPUTED normalization (major speedup!)
         x = torch.log(x + 1e-6)
-        x = (x - x.mean()) / (x.std() + 1e-8)
+        x = (x - self.global_log_mean) / (self.global_log_std + 1e-8)
         
         # Ensure channel dimension
         if x.dim() == 2:
@@ -93,14 +156,14 @@ class ZarrDataset(Dataset):
         
         return (x,)
     
-    def _dequantize(self, x):
-        """Apply dequantization based on stored data type."""
+    def _dequantize_fast(self, x):
+        """Optimized dequantization with minimal branching."""
         dtype = self.metadata["dtype"]
         if dtype == "uint16":
-            return x / 65535.0 * self.metadata["data_range"] + self.metadata["data_min"]
+            return x * (self.metadata["data_range"] / 65535.0) + self.metadata["data_min"]
         elif dtype == "float16":
-            return x.float()
-        return x  # float32 already ready
+            return x  # Already float32 from torch.from_numpy().float()
+        return x  # float32 ready
 
 class LitAE(pl.LightningModule):
     def __init__(self, latent_dim: int, lr: float, realtime_metrics: bool = False, 
@@ -130,22 +193,24 @@ class LitAE(pl.LightningModule):
         loss_dict = self.model.compute_loss(x, x_hat, z, self.lambda_act, self.lambda_sim, self.lambda_div)
         loss = loss_dict['total_loss']
 
-        # Record for the post-run plot
-        self.train_losses.append(loss.detach().cpu().item())
+        # Record for the post-run plot (use .item() to avoid GPU-CPU sync on every step)
+        if batch_idx % 10 == 0:  # Only record every 10 steps to reduce overhead
+            self.train_losses.append(loss.detach().cpu().item())
 
-        # Log loss components
+        # Log essential metrics only (remove expensive regularization term logging)
         self.log("train_loss", loss, prog_bar=True)
         self.log("train_mse", loss_dict['mse_loss'], prog_bar=False)
-        self.log("train_lp_reg", loss_dict['lp_reg'], prog_bar=False)
-        self.log("train_contrastive_reg", loss_dict['contrastive_reg'], prog_bar=False)
-        self.log("train_divergence_reg", loss_dict['divergence_reg'], prog_bar=False)
 
-        # Calculate reconstruction metrics every N steps (if enabled)
-        if self.realtime_metrics and batch_idx % 10 == 0:
+        # REMOVED: Expensive real-time PSNR/SSIM calculations during training
+        # These force CPU-GPU synchronization and are computationally expensive
+        # Metrics are still calculated during validation and final evaluation
+        
+        # Optional: Calculate metrics much less frequently (every 100 steps)
+        if self.realtime_metrics and batch_idx % 100 == 0:
             with torch.no_grad():
                 metrics = calculate_metrics(x, x_hat)
-                self.log("train_psnr", metrics['psnr'], prog_bar=True)
-                self.log("train_ssim", metrics['ssim'], prog_bar=True)
+                self.log("train_psnr", metrics['psnr'], prog_bar=False)  # Remove from progress bar
+                self.log("train_ssim", metrics['ssim'], prog_bar=False)
 
         return loss
 
@@ -215,17 +280,23 @@ def create_train_val_split(full_dataset, no_validation, logger):
     return train_ds, val_ds
 
 def create_data_loaders(train_ds, val_ds, args):
-    """Create training and validation data loaders."""
+    """Create optimized training and validation data loaders."""
+    # Optimize batch size for mixed precision (can use larger batches with 16-bit)
+    optimized_batch_size = min(args.batch * 2, 64)  # Cap at 64 for memory safety with 1024x1024 images
+    
     dataloader_kwargs = {
-        'batch_size': args.batch,
-        'num_workers': args.num_workers,
+        'batch_size': optimized_batch_size,
+        'num_workers': min(8, args.num_workers * 2),  # Increase workers for better CPU utilization
         'pin_memory': args.pin_memory,
-        'persistent_workers': args.persistent_workers
+        'persistent_workers': args.persistent_workers,
+        'prefetch_factor': 4,  # Prefetch 4 batches per worker
+        'drop_last': True,     # Ensure consistent batch sizes for mixed precision
     }
     
     train_dl = DataLoader(train_ds, shuffle=True, **dataloader_kwargs)
     val_dl = DataLoader(val_ds, shuffle=False, **dataloader_kwargs) if val_ds else None
     
+    print(f"Optimized data loading: batch_size={optimized_batch_size}, num_workers={dataloader_kwargs['num_workers']}")
     return train_dl, val_dl
 
 def create_model(args, detected_size):
@@ -289,7 +360,10 @@ def setup_trainer(args, base_name):
         devices=devices,
         logger=tb_logger,
         enable_progress_bar=True,
-        callbacks=[checkpoint_callback]
+        callbacks=[checkpoint_callback],
+        precision="16-mixed",  # Enable mixed precision for 2x speedup
+        gradient_clip_val=1.0,  # Stabilize mixed precision training
+        accumulate_grad_batches=args.accumulate_grad_batches  # Enable gradient accumulation
     )
 
 def train_model(trainer, model, train_dl, val_dl, logger, start_time):
@@ -440,6 +514,7 @@ def main():
     p.add_argument("--profile", action="store_true", help="Enable PyTorch profiler for performance analysis")
     p.add_argument("--no_validation", action="store_true", help="Disable train/validation split - use entire dataset for training")
     p.add_argument("--save_every_n_epochs", type=int, default=1, help="Save checkpoint every N epochs (default: 1)")
+    p.add_argument("--accumulate_grad_batches", type=int, default=1, help="Number of batches to accumulate gradients over (default: 1)")
 
     args = p.parse_args()
 
