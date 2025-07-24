@@ -91,7 +91,10 @@ class HDF5Dataset(Dataset):
     def _ensure_file_open(self):
         """Ensure HDF5 file is open. Called lazily to avoid pickling issues."""
         if self.h5_file is None:
-            self.h5_file = h5py.File(str(self.data_path), 'r')
+            # OPTIMIZATION: Open HDF5 with optimized settings for better I/O performance
+            self.h5_file = h5py.File(str(self.data_path), 'r', 
+                                   rdcc_nbytes=1024*1024*64,  # 64MB chunk cache
+                                   rdcc_nslots=10007)         # More cache slots
             self.arr = self.h5_file['patterns']
     
     
@@ -247,24 +250,16 @@ class LitAE(pl.LightningModule):
         loss_dict = self.model.compute_loss(x, x_hat, z, self.lambda_act, self.lambda_sim, self.lambda_div)
         loss = loss_dict['total_loss']
 
-        # Record for the post-run plot (use .item() to avoid GPU-CPU sync on every step)
-        if batch_idx % 10 == 0:  # Only record every 10 steps to reduce overhead
+        # OPTIMIZATION: Record losses much less frequently to reduce CPU-GPU sync
+        if batch_idx % 50 == 0:  # Reduced from every 10 steps
             self.train_losses.append(loss.detach().cpu().item())
 
         # Log essential metrics only (remove expensive regularization term logging)
         self.log("train_loss", loss, prog_bar=True)
         self.log("train_mse", loss_dict['mse_loss'], prog_bar=False)
 
-        # REMOVED: Expensive real-time PSNR/SSIM calculations during training
-        # These force CPU-GPU synchronization and are computationally expensive
-        # Metrics are still calculated during validation and final evaluation
-        
-        # Optional: Calculate metrics much less frequently (every 100 steps)
-        if self.realtime_metrics and batch_idx % 100 == 0:
-            with torch.no_grad():
-                metrics = calculate_metrics(x, x_hat)
-                self.log("train_psnr", metrics['psnr'], prog_bar=False)  # Remove from progress bar
-                self.log("train_ssim", metrics['ssim'], prog_bar=False)
+        # REMOVED: Real-time metrics completely during training to eliminate CPU-GPU sync
+        # Metrics calculated only during validation for performance monitoring
 
         return loss
 
@@ -335,31 +330,40 @@ def create_train_val_split(full_dataset, no_validation, logger):
 
 def create_data_loaders(train_ds, val_ds, args):
     """Create optimized training and validation data loaders."""
-    # Reduce workers to prevent log duplication - use fewer workers for cleaner output
-    # On Windows, use 0 workers to avoid HDF5 pickling issues
+    # OPTIMIZATION: Improve data loading performance
     import platform
     if platform.system() == 'Windows':
         num_workers = 0  # Avoid multiprocessing on Windows due to HDF5 pickling issues
-        print("Windows detected: Using single-threaded data loading to avoid HDF5 pickling issues")
+        print("Windows detected: Using single-threaded data loading")
+        print("PERFORMANCE TIP: Consider moving HDF5 file to fast SSD for better I/O performance")
     else:
-        num_workers = min(16, args.num_workers)  # Reduce workers to minimize log spam
+        num_workers = min(8, args.num_workers)  # Optimal for most systems without overwhelming
     
     dataloader_kwargs = {
         'batch_size': args.batch,
         'num_workers': num_workers,
-        'pin_memory': args.pin_memory,
+        'pin_memory': args.pin_memory and torch.cuda.is_available(),  # Only pin if GPU available
         'persistent_workers': args.persistent_workers and num_workers > 0,
         'drop_last': True,     # Ensure consistent batch sizes for mixed precision
     }
     
-    # Only set prefetch_factor if using multiprocessing
+    # OPTIMIZATION: Tune prefetch and buffer size for better performance
     if num_workers > 0:
-        dataloader_kwargs['prefetch_factor'] = 2  # Reduce prefetch to minimize memory usage
+        dataloader_kwargs['prefetch_factor'] = 4  # Increase prefetch for better pipeline
+    
+    # OPTIMIZATION: Add multiprocessing context for better performance on Unix systems
+    if num_workers > 0 and platform.system() != 'Windows':
+        import multiprocessing as mp
+        dataloader_kwargs['multiprocessing_context'] = mp.get_context('spawn')
     
     train_dl = DataLoader(train_ds, shuffle=True, **dataloader_kwargs)
     val_dl = DataLoader(val_ds, shuffle=False, **dataloader_kwargs) if val_ds else None
     
     print(f"Data loading config: batch_size={args.batch}, num_workers={num_workers}")
+    if num_workers == 0:
+        print("WARNING: Single-threaded data loading may cause GPU underutilization")
+        print("Consider: 1) Using faster storage (NVMe SSD), 2) Increasing batch size, 3) Using --persistent_workers")
+    
     return train_dl, val_dl
 
 def create_model(args, detected_size):
