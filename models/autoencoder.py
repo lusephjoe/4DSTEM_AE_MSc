@@ -2,7 +2,8 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from .blocks import ResNetBlock, ConvBlock, IdentityBlock, EmbeddingLayer, AdaptiveDecoder, ContrastiveLoss, DivergenceLoss
+from .blocks import ResNetBlock, ConvBlock, IdentityBlock, EmbeddingLayer, AdaptiveDecoder
+from .losses import LossManager, create_loss_config_from_args
 
 class Encoder(nn.Module):
     """ResNet-based encoder for image-size agnostic processing."""
@@ -85,18 +86,29 @@ class Decoder(nn.Module):
         return self.decoder(z)
 
 class Autoencoder(nn.Module):
-    """ResNet-based autoencoder with regularized loss."""
+    """ResNet-based autoencoder with flexible loss system."""
     
-    def __init__(self, latent_dim: int = 32, out_shape: tuple[int,int] = (256, 256)):
+    def __init__(self, latent_dim: int = 32, out_shape: tuple[int,int] = (256, 256), 
+                 loss_config: dict = None):
         super().__init__()
         self.encoder = Encoder(latent_dim)
         self.decoder = Decoder(latent_dim, out_shape)
         
-        # Loss components
-        self.mse_loss = nn.MSELoss()
-        self.l1_loss = nn.L1Loss()
-        self.contrastive_loss = ContrastiveLoss()
-        self.divergence_loss = DivergenceLoss()
+        # Initialize flexible loss system
+        if loss_config is None:
+            loss_config = {
+                'reconstruction_loss': 'mse',
+                'regularization_losses': {
+                    'lp_reg': 1e-4,
+                    'contrastive': 5e-5,
+                    'divergence': 2e-4
+                }
+            }
+        
+        self.loss_manager = LossManager(
+            reconstruction_loss=loss_config['reconstruction_loss'],
+            regularization_losses=loss_config.get('regularization_losses', {})
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         z = self.encoder(x)
@@ -114,37 +126,17 @@ class Autoencoder(nn.Module):
         return self.encoder(x)
     
     def compute_loss(self, x: torch.Tensor, x_hat: torch.Tensor, z: torch.Tensor, 
-                    lambda_act: float = 1e-4, lambda_sim: float = 5e-5, lambda_div: float = 2e-4, 
-                    ln_parm: int = 1) -> dict:
-        """Compute regularized loss with all components."""
-        
-        # Main reconstruction loss
-        mse_loss = self.mse_loss(x_hat, x)
-        
-        # Lp norm regularization with batch normalization (like m3_learning)
-        batch_size = x.shape[0]
-        lp_reg = torch.norm(z, ln_parm) / batch_size
-        
-        # Handle zero case like m3_learning
-        if lp_reg == 0:
-            lp_reg = torch.tensor(0.5, device=z.device)
-        
-        # Contrastive similarity regularization
-        contrastive_reg = self.contrastive_loss(z)
-        
-        # Activation divergence regularization
-        divergence_reg = self.divergence_loss(z)
-        
-        # Total loss (subtract divergence to encourage diversity like m3_learning)
-        total_loss = (mse_loss + 
-                     lambda_act * lp_reg + 
-                     lambda_sim * contrastive_reg - 
-                     lambda_div * divergence_reg)
-        
-        return {
-            'total_loss': total_loss,
-            'mse_loss': mse_loss,
-            'lp_reg': lp_reg,
-            'contrastive_reg': contrastive_reg,
-            'divergence_reg': divergence_reg
-        }
+                    **kwargs) -> dict:
+        """Compute loss using flexible loss system."""
+        return self.loss_manager.compute_loss(x, x_hat, z, **kwargs)
+    
+    def get_loss_info(self) -> dict:
+        """Get information about configured losses."""
+        return self.loss_manager.get_loss_names()
+    
+    def update_loss_config(self, loss_config: dict):
+        """Update loss configuration."""
+        self.loss_manager = LossManager(
+            reconstruction_loss=loss_config['reconstruction_loss'],
+            regularization_losses=loss_config.get('regularization_losses', {})
+        )

@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 sys.path.append(str(Path(__file__).parent.parent.parent))
 from models.autoencoder import Autoencoder
+from models.losses import create_loss_config_from_args, get_available_losses
 
 # Suppress stem_visualization warnings once at import
 try:
@@ -260,19 +261,25 @@ class HDF5Dataset(Dataset):
 
 class LitAE(pl.LightningModule):
     def __init__(self, latent_dim: int, lr: float, realtime_metrics: bool = False, 
-                 lambda_act: float = 1e-4, lambda_sim: float = 5e-5, lambda_div: float = 2e-4,
-                 out_shape: tuple[int,int] = (256, 256)):
+                 loss_config: dict = None, out_shape: tuple[int,int] = (256, 256)):
         super().__init__()
         self.save_hyperparameters()
-        self.model = Autoencoder(latent_dim, out_shape)
+        
+        # Create model with loss configuration
+        self.model = Autoencoder(latent_dim, out_shape, loss_config)
         self.train_losses: list[float] = []
         self.validation_metrics: dict = {}
         self.realtime_metrics = realtime_metrics
         
-        # Regularization parameters
-        self.lambda_act = lambda_act
-        self.lambda_sim = lambda_sim
-        self.lambda_div = lambda_div
+        # Store loss config for logging
+        self.loss_config = loss_config or {
+            'reconstruction_loss': 'mse',
+            'regularization_losses': {
+                'lp_reg': 1e-4,
+                'contrastive': 5e-5,
+                'divergence': 2e-4
+            }
+        }
 
     def forward(self, x):
         return self.model(x)
@@ -282,20 +289,22 @@ class LitAE(pl.LightningModule):
         z = self.model.embed(x)
         x_hat = self.model.decoder(z)
         
-        # Compute regularized loss
-        loss_dict = self.model.compute_loss(x, x_hat, z, self.lambda_act, self.lambda_sim, self.lambda_div)
+        # Compute loss using flexible loss system
+        loss_dict = self.model.compute_loss(x, x_hat, z)
         loss = loss_dict['total_loss']
 
         # OPTIMIZATION: Record losses much less frequently to reduce CPU-GPU sync
         if batch_idx % 50 == 0:  # Reduced from every 10 steps
             self.train_losses.append(loss.detach().cpu().item())
 
-        # Log essential metrics only (remove expensive regularization term logging)
+        # Log essential metrics only
         self.log("train_loss", loss, prog_bar=True)
-        self.log("train_mse", loss_dict['mse_loss'], prog_bar=False)
-
-        # REMOVED: Real-time metrics completely during training to eliminate CPU-GPU sync
-        # Metrics calculated only during validation for performance monitoring
+        
+        # Log main reconstruction loss (dynamically based on loss type)
+        recon_loss_key = f"{self.model.loss_manager.reconstruction_loss.name}_loss"
+        if recon_loss_key in loss_dict:
+            self.log(f"train_{self.model.loss_manager.reconstruction_loss.name}", 
+                    loss_dict[recon_loss_key], prog_bar=False)
 
         return loss
 
@@ -304,15 +313,21 @@ class LitAE(pl.LightningModule):
         z = self.model.embed(x)
         x_hat = self.model.decoder(z)
         
-        # Compute regularized loss
-        loss_dict = self.model.compute_loss(x, x_hat, z, self.lambda_act, self.lambda_sim, self.lambda_div)
+        # Compute loss using flexible loss system
+        loss_dict = self.model.compute_loss(x, x_hat, z)
         loss = loss_dict['total_loss']
         
         # Calculate detailed metrics for validation
         metrics = calculate_metrics(x, x_hat)
         
         self.log("val_loss", loss, prog_bar=True)
-        self.log("val_mse", loss_dict['mse_loss'], prog_bar=False)
+        
+        # Log main reconstruction loss (dynamically based on loss type)
+        recon_loss_key = f"{self.model.loss_manager.reconstruction_loss.name}_loss"
+        if recon_loss_key in loss_dict:
+            self.log(f"val_{self.model.loss_manager.reconstruction_loss.name}", 
+                    loss_dict[recon_loss_key], prog_bar=False)
+        
         self.log("val_psnr", metrics['psnr'], prog_bar=True)
         self.log("val_ssim", metrics['ssim'], prog_bar=True)
         
@@ -435,11 +450,13 @@ def create_data_loaders(train_ds, val_ds, args):
     return train_dl, val_dl
 
 def create_model(args, detected_size):
-    """Create the autoencoder model."""
+    """Create the autoencoder model with flexible loss configuration."""
+    # Create loss configuration from args
+    loss_config = create_loss_config_from_args(args)
+    
     return LitAE(
         args.latent, args.lr, args.realtime_metrics,
-        args.lambda_act, args.lambda_sim, args.lambda_div,
-        (detected_size, detected_size)
+        loss_config, (detected_size, detected_size)
     )
 
 def generate_model_summary(model, train_dl, args):
@@ -654,9 +671,18 @@ def main():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--summary", type=bool, default=True)
     p.add_argument("--realtime_metrics", action="store_true", help="Enable real-time metrics calculation during training (may slow down training)")
-    p.add_argument("--lambda_act", type=float, default=1e-5, help="L1 regularization coefficient for sparsity")
+    # Loss function arguments  
+    available_losses = get_available_losses()
+    p.add_argument("--loss_function", type=str, default="mse", 
+                   choices=available_losses['reconstruction'],
+                   help=f"Reconstruction loss function. Available: {available_losses['reconstruction']}")
+    
+    # Regularization arguments
+    p.add_argument("--lambda_act", type=float, default=1e-5, help="Lp regularization coefficient for sparsity")
     p.add_argument("--lambda_sim", type=float, default=0, help="Contrastive similarity regularization coefficient")
     p.add_argument("--lambda_div", type=float, default=0, help="Activation divergence regularization coefficient")
+    p.add_argument("--lambda_l2", type=float, default=0, help="L2 regularization coefficient")
+    p.add_argument("--lambda_kl", type=float, default=0, help="KL divergence regularization coefficient")
     p.add_argument("--input_size", type=int, default=256, help="Input image size (assumes square images)")
     p.add_argument("--precision", choices=["32", "16", "bf16"], default="16", help="Training precision (32=float32, 16=float16, bf16=bfloat16)")
     p.add_argument("--compile", action="store_true", help="Use torch.compile for faster training (PyTorch 2.0+)")
@@ -701,6 +727,20 @@ def main():
     # Create data loaders and model
     train_dl, val_dl = create_data_loaders(train_ds, val_ds, args)
     model = create_model(args, detected_size)
+    
+    # Log loss configuration
+    loss_info = model.model.get_loss_info()
+    logger.info("Loss Configuration:")
+    logger.info(f"  Reconstruction loss: {loss_info['reconstruction']}")
+    if len([k for k in loss_info.keys() if k.startswith('regularization_')]) > 0:
+        logger.info("  Regularization losses:")
+        for key, value in loss_info.items():
+            if key.startswith('regularization_'):
+                reg_name = key.replace('regularization_', '')
+                weight = getattr(args, f'lambda_{reg_name.split("_")[0]}', 'N/A')
+                logger.info(f"    {value}: {weight}")
+    else:
+        logger.info("  No regularization losses configured")
     
     if args.summary:
         generate_model_summary(model, train_dl, args)
