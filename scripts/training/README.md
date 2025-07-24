@@ -13,7 +13,7 @@ This directory contains scripts for training 4D-STEM autoencoders.
 
 **Usage:**
 ```bash
-python train.py --data processed_data.pt --output_dir outputs --epochs 50
+python train.py --data processed_data.h5 --output_dir outputs --epochs 50
 ```
 
 **Key Features:**
@@ -23,34 +23,6 @@ python train.py --data processed_data.pt --output_dir outputs --epochs 50
 - Advanced optimizers (AdamW + scheduler)
 - Memory-efficient data loading
 - Real-time metrics and progress tracking
-
-### `train_hyperspy.py`
-**HyperSpy-based training script (RECOMMENDED)**
-- Loads `.hspy` files directly with lazy loading
-- Memory-efficient training for large datasets
-- On-the-fly preprocessing and normalization
-- Chunk-based loading for scalability
-
-**Usage:**
-```bash
-python train_hyperspy.py --data data.hspy --output_dir outputs --use_chunked
-```
-
-**Key Features:**
-- Lazy loading - minimal memory usage
-- Chunked dataset support
-- On-the-fly downsampling and normalization
-- Configurable preprocessing parameters
-- Memory monitoring and optimization
-
-### `hyperspy_dataset.py`
-**PyTorch dataset implementations for HyperSpy**
-- `HyperSpyDataset`: Individual pattern loading
-- `ChunkedHyperSpyDataset`: Chunk-based loading with caching
-
-**Classes:**
-- `HyperSpyDataset`: Loads patterns on-demand
-- `ChunkedHyperSpyDataset`: Loads patterns in chunks with LRU caching
 
 ## Training Options
 

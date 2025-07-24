@@ -63,25 +63,36 @@ class HDF5Dataset(Dataset):
         if self.data_path.suffix != '.h5':
             raise ValueError(f"Only HDF5 files (.h5) are supported, got: {self.data_path.suffix}")
         
-        # Load HDF5 file
-        self.h5_file = h5py.File(str(data_path), 'r')
-        self.arr = self.h5_file['patterns']
+        # Don't open HDF5 file in __init__ to avoid pickling issues
+        self.h5_file = None
+        self.arr = None
         
-        # Load metadata from HDF5 attributes or fallback to defaults
-        if hasattr(self.arr, 'attrs') and len(self.arr.attrs) > 0:
-            self.metadata = dict(self.arr.attrs)
-            print(f"Loaded HDF5 dataset with metadata: {list(self.metadata.keys())}")
-        else:
-            print("Warning: No metadata found in HDF5 file, using defaults")
-            self.metadata = {"data_min": 0.0, "data_max": 1.0, "data_range": 1.0, "dtype": "float16"}
+        # Get metadata and shape from a temporary file handle
+        with h5py.File(str(data_path), 'r') as temp_file:
+            temp_arr = temp_file['patterns']
+            self.shape = temp_arr.shape
+        
+            # Load metadata from HDF5 attributes or fallback to defaults
+            if hasattr(temp_arr, 'attrs') and len(temp_arr.attrs) > 0:
+                self.metadata = dict(temp_arr.attrs)
+                print(f"Loaded HDF5 dataset with metadata: {list(self.metadata.keys())}")
+            else:
+                print("Warning: No metadata found in HDF5 file, using defaults")
+                self.metadata = {"data_min": 0.0, "data_max": 1.0, "data_range": 1.0, "dtype": "float16"}
         
         # Load or compute global normalization statistics ONCE
         print("Loading/computing normalization statistics...")
         self._load_or_compute_global_stats()
         
-        print(f"Loaded HDF5 dataset: {self.arr.shape} patterns, dtype: {self.metadata['dtype']}")
+        print(f"Loaded HDF5 dataset: {self.shape} patterns, dtype: {self.metadata['dtype']}")
         print(f"Data range: {self.metadata['data_min']:.3f} to {self.metadata['data_min'] + self.metadata['data_range']:.3f}")
         print(f"Global normalization: mean={self.global_log_mean:.4f}, std={self.global_log_std:.4f}")
+    
+    def _ensure_file_open(self):
+        """Ensure HDF5 file is open. Called lazily to avoid pickling issues."""
+        if self.h5_file is None:
+            self.h5_file = h5py.File(str(self.data_path), 'r')
+            self.arr = self.h5_file['patterns']
     
     
     def _load_or_compute_global_stats(self):
@@ -100,7 +111,7 @@ class HDF5Dataset(Dataset):
     
     def _compute_and_save_global_stats(self, stats_path):
         """Compute global log-space statistics efficiently using streaming approach."""
-        total_patterns = self.arr.shape[0]
+        total_patterns = self.shape[0]
         
         # Use much smaller sample size for very large datasets to avoid hanging
         n_samples = min(500, total_patterns // 10)  # Much smaller sample, but representative
@@ -116,35 +127,40 @@ class HDF5Dataset(Dataset):
         total_count = 0
         
         print("Computing statistics with streaming approach...")
-        for i, idx in enumerate(indices):
-            if i % 100 == 0:  # More frequent updates
-                print(f"Processing sample {i+1}/{len(indices)}... ({100*i/len(indices):.1f}%)")
+        
+        # Open file temporarily for statistics computation
+        with h5py.File(str(self.data_path), 'r') as temp_file:
+            temp_arr = temp_file['patterns']
             
-            try:
-                # Load single pattern
-                pattern = np.array(self.arr[idx])
+            for i, idx in enumerate(indices):
+                if i % 100 == 0:  # More frequent updates
+                    print(f"Processing sample {i+1}/{len(indices)}... ({100*i/len(indices):.1f}%)")
                 
-                # Apply same dequantization as in training
-                if self.metadata["dtype"] == "uint16":
-                    pattern = pattern.astype("float32") / 65535.0 * self.metadata["data_range"] + self.metadata["data_min"]
-                elif self.metadata["dtype"] == "float16":
-                    pattern = pattern.astype("float32")
-                
-                # Apply log scaling
-                log_pattern = np.log(pattern + 1e-6)
-                
-                # Use Welford's online algorithm for numerical stability and memory efficiency
-                flat_pattern = log_pattern.flatten()
-                for value in flat_pattern[::100]:  # Subsample pixels for speed (every 100th pixel)
-                    total_count += 1
-                    delta = value - running_mean
-                    running_mean += delta / total_count
-                    delta2 = value - running_mean
-                    running_m2 += delta * delta2
-                
-            except Exception as e:
-                print(f"Warning: Failed to process pattern {idx}: {e}")
-                continue
+                    try:
+                        # Load single pattern
+                        pattern = np.array(temp_arr[idx])
+                        
+                        # Apply same dequantization as in training
+                        if self.metadata["dtype"] == "uint16":
+                            pattern = pattern.astype("float32") / 65535.0 * self.metadata["data_range"] + self.metadata["data_min"]
+                        elif self.metadata["dtype"] == "float16":
+                            pattern = pattern.astype("float32")
+                        
+                        # Apply log scaling
+                        log_pattern = np.log(pattern + 1e-6)
+                        
+                        # Use Welford's online algorithm for numerical stability and memory efficiency
+                        flat_pattern = log_pattern.flatten()
+                        for value in flat_pattern[::100]:  # Subsample pixels for speed (every 100th pixel)
+                            total_count += 1
+                            delta = value - running_mean
+                            running_mean += delta / total_count
+                            delta2 = value - running_mean
+                            running_m2 += delta * delta2
+                        
+                    except Exception as e:
+                        print(f"Warning: Failed to process pattern {idx}: {e}")
+                        continue
         
         # Finalize statistics
         self.global_log_mean = float(running_mean)
@@ -167,12 +183,15 @@ class HDF5Dataset(Dataset):
         print(f"Used {len(indices)} patterns and {total_count} pixel samples")
     
     def __len__(self):
-        return self.arr.shape[0]
+        return self.shape[0]
     
     def __getitem__(self, idx):
         # OPTIMIZED: Fast path with pre-computed normalization
         if torch.is_tensor(idx):
             idx = idx.item()
+        
+        # Ensure file is open (lazy loading)
+        self._ensure_file_open()
         
         # Direct conversion with minimal copies
         pattern = np.array(self.arr[idx])
@@ -317,7 +336,13 @@ def create_train_val_split(full_dataset, no_validation, logger):
 def create_data_loaders(train_ds, val_ds, args):
     """Create optimized training and validation data loaders."""
     # Reduce workers to prevent log duplication - use fewer workers for cleaner output
-    num_workers = min(16, args.num_workers)  # Reduce workers to minimize log spam
+    # On Windows, use 0 workers to avoid HDF5 pickling issues
+    import platform
+    if platform.system() == 'Windows':
+        num_workers = 0  # Avoid multiprocessing on Windows due to HDF5 pickling issues
+        print("Windows detected: Using single-threaded data loading to avoid HDF5 pickling issues")
+    else:
+        num_workers = min(16, args.num_workers)  # Reduce workers to minimize log spam
     
     dataloader_kwargs = {
         'batch_size': args.batch,

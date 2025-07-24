@@ -308,13 +308,18 @@ def main():
     
     # Check file size
     if args.output.exists():
-        file_size_gb = sum(f.stat().st_size for f in args.output.rglob('*') if f.is_file()) / 1024**3
+        # For HDF5 files, get the actual file size directly
+        file_size_bytes = args.output.stat().st_size
+        file_size_gb = file_size_bytes / 1024**3
         print(f"Output file size: {file_size_gb:.2f} GB")
         
-        # Calculate compression ratio
-        original_size_gb = total_patterns * qy_final * qx_final * 4 / 1024**3  # float32 size
-        compression_ratio = original_size_gb / file_size_gb
-        print(f"Compression ratio: {compression_ratio:.1f}x (from {original_size_gb:.2f} GB to {file_size_gb:.2f} GB)")
+        # Calculate compression ratio (avoid division by zero)
+        if file_size_gb > 0:
+            original_size_gb = total_patterns * qy_final * qx_final * 4 / 1024**3  # float32 size
+            compression_ratio = original_size_gb / file_size_gb
+            print(f"Compression ratio: {compression_ratio:.1f}x (from {original_size_gb:.2f} GB to {file_size_gb:.2f} GB)")
+        else:
+            print("Warning: Could not determine file size for compression ratio calculation")
     
     print(f"Saved {total_patterns} patterns of size {qy_final}x{qx_final} → {args.output}")
 

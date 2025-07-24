@@ -4,12 +4,14 @@ A ResNet-based convolutional autoencoder for dimensionality reduction and analys
 
 ## 🎯 Key Features
 
-- **Image-size agnostic processing** - Works with any input size (32×32 to 512×512+)
+- **Image-size agnostic processing** - Works with any input size (256×256 to 1024×1024+)
 - **ResNet-based architecture** with skip connections and adaptive pooling
+- **HDF5 data format** - Efficient, compressed storage with integrated metadata
 - **Regularized training** with multiple loss components (MSE + L1 + contrastive + divergence)
 - **Sparse embedding layer** with non-negative activations (variable dimension latent space)
+- **Mixed precision training** - Support for bf16 (A100) and float16 precision
+- **Checkpoint resuming** - Resume training from any saved epoch
 - **Comprehensive evaluation** with PSNR, SSIM, and MSE metrics
-- **Professional STEM visualization** with virtual bright/dark field imaging
 
 ## 🚀 Quick Start
 
@@ -20,41 +22,47 @@ pip install -r requirements.txt
 
 ### 2. Convert Data
 ```bash
-python scripts/convert_dm4.py \
+python scripts/preprocessing/convert_dm4.py \
     --input data/Diffraction_SI.dm4 \
-    --output data/train_tensor.pt
+    --output data/train_data.zarr \
+    --downsample 2
 ```
+*Note: Output will be automatically saved as `train_data.h5` with HDF5 format*
 
 ### 3. Train Model
 ```bash
-python scripts/train.py \
-    --data data/train_tensor.pt \
+python scripts/training/train.py \
+    --data data/train_data.h5 \
     --output_dir outputs \
     --epochs 50 \
-    --device cpu
+    --batch 16 \
+    --latent 128 \
+    --precision bf16
 ```
 
-### 4. Generate Embeddings
+### 4. Resume Training (Optional)
+```bash
+python scripts/training/train.py \
+    --data data/train_data.h5 \
+    --output_dir outputs \
+    --epochs 100 \
+    --resume_from_checkpoint outputs/checkpoints/ae_e050_*.ckpt
+```
+
+### 5. Generate Embeddings
 ```bash
 python scripts/generate_embeddings.py \
-    --input data/train_tensor.pt \
-    --checkpoint outputs/ae.ckpt \
+    --input data/train_data.h5 \
+    --checkpoint outputs/ae_*_final.ckpt \
     --output outputs/embeddings.pt
-```
-
-### 5. Visualize Results
-```bash
-python scripts/visualise_scan_latents.py \
-    --raw data/train_tensor.pt \
-    --latents outputs/embeddings.pt \
-    --scan 42 114 \
-    --outfig outputs/latent_mosaic.png
 ```
 
 ## 📊 Model Performance
 
-- **Latent dimension**: sparse embeddings
-- **Input flexibility**: 32×32 to 512×512+ diffraction patterns
+- **Latent dimension**: Configurable (32, 64, 128, 256...)
+- **Input flexibility**: 256×256 to 1024×1024+ diffraction patterns  
+- **Data format**: HDF5 with gzip compression (~10x size reduction)
+- **Training speed**: Mixed precision (bf16/float16) for 2x speedup
 - **Reconstruction quality**: PSNR, SSIM, and MSE tracking
 
 ## 📁 Project Structure
