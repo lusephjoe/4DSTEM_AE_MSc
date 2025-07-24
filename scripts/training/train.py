@@ -17,7 +17,7 @@ except ImportError:
     import warnings
     warnings.filterwarnings("ignore", message=".*stem_visualization.*")
     from models.summary import show, calculate_metrics
-import zarr
+import h5py
 import json
 import datetime
 import logging
@@ -53,48 +53,40 @@ def setup_logging(output_dir: Path, args, timestamp: str) -> logging.Logger:
     
     return logger
 
-class ZarrDataset(Dataset):
-    """Optimized dataset for lazy loading of zarr-compressed 4D-STEM data with pre-computed normalization."""
+class HDF5Dataset(Dataset):
+    """Optimized dataset for lazy loading of HDF5-compressed 4D-STEM data with pre-computed normalization."""
     
-    def __init__(self, zarr_path, metadata_path=None):
-        self.zarr_path = Path(zarr_path)
+    def __init__(self, data_path, metadata_path=None):
+        self.data_path = Path(data_path)
         
-        # Try to open as xarray dataset first, fallback to raw zarr
-        try:
-            import xarray as xr
-            ds = xr.open_zarr(str(zarr_path))
-            self.arr = ds.patterns.data  # Get the dask array
-            # Load metadata from xarray attributes
-            self.metadata = dict(ds.attrs) if hasattr(ds, 'attrs') else {}
-            print(f"Loaded xarray zarr dataset with metadata: {list(self.metadata.keys())}")
-        except:
-            # Fallback to raw zarr
-            self.arr = zarr.open(str(zarr_path), mode="r")
-            # Load metadata with fallback defaults
-            metadata_path = metadata_path or self.zarr_path.parent / f"{self.zarr_path.stem}_metadata.json"
-            self.metadata = self._load_metadata(metadata_path)
-            print(f"Loaded raw zarr dataset")
+        # Only support HDF5 files now
+        if self.data_path.suffix != '.h5':
+            raise ValueError(f"Only HDF5 files (.h5) are supported, got: {self.data_path.suffix}")
+        
+        # Load HDF5 file
+        self.h5_file = h5py.File(str(data_path), 'r')
+        self.arr = self.h5_file['patterns']
+        
+        # Load metadata from HDF5 attributes or fallback to defaults
+        if hasattr(self.arr, 'attrs') and len(self.arr.attrs) > 0:
+            self.metadata = dict(self.arr.attrs)
+            print(f"Loaded HDF5 dataset with metadata: {list(self.metadata.keys())}")
+        else:
+            print("Warning: No metadata found in HDF5 file, using defaults")
+            self.metadata = {"data_min": 0.0, "data_max": 1.0, "data_range": 1.0, "dtype": "float16"}
         
         # Load or compute global normalization statistics ONCE
         print("Loading/computing normalization statistics...")
         self._load_or_compute_global_stats()
         
-        print(f"Loaded zarr dataset: {self.arr.shape} patterns, dtype: {self.metadata['dtype']}")
+        print(f"Loaded HDF5 dataset: {self.arr.shape} patterns, dtype: {self.metadata['dtype']}")
         print(f"Data range: {self.metadata['data_min']:.3f} to {self.metadata['data_min'] + self.metadata['data_range']:.3f}")
         print(f"Global normalization: mean={self.global_log_mean:.4f}, std={self.global_log_std:.4f}")
     
-    def _load_metadata(self, metadata_path):
-        """Load metadata with default fallback."""
-        if metadata_path.exists():
-            with open(metadata_path, 'r') as f:
-                return json.load(f)
-        
-        print(f"Warning: No metadata found at {metadata_path}, using defaults")
-        return {"data_min": 0.0, "data_max": 1.0, "data_range": 1.0, "dtype": "uint16"}
     
     def _load_or_compute_global_stats(self):
         """Load pre-computed global statistics or compute them once."""
-        stats_path = self.zarr_path.parent / f"{self.zarr_path.stem}_normalization_stats.json"
+        stats_path = self.data_path.parent / f"{self.data_path.stem}_normalization_stats.json"
         
         if stats_path.exists():
             print("Loading pre-computed normalization statistics...")
@@ -282,9 +274,9 @@ class LitAE(pl.LightningModule):
 
 def load_dataset(data_path, logger):
     """Load dataset and detect input size."""
-    if data_path.suffix == '.zarr' or data_path.is_dir():
-        logger.info(f"Loading zarr dataset from: {data_path}")
-        dataset = ZarrDataset(data_path)
+    if data_path.suffix == '.h5':
+        logger.info(f"Loading HDF5 dataset from: {data_path}")
+        dataset = HDF5Dataset(data_path)
         sample = dataset[0][0] if isinstance(dataset[0], tuple) else dataset[0]
         detected_size = sample.shape[-1]
     else:

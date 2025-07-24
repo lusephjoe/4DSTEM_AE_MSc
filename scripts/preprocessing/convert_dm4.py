@@ -23,12 +23,10 @@ import torch
 import hyperspy.api as hs  # pip install hyperspy
 from scipy.ndimage import gaussian_filter
 import gc
-import zarr
 import dask.array as da
-import numcodecs
 import json
 from tqdm import tqdm
-import xarray as xr
+import h5py
 
 # ─────────────────────────── helpers ────────────────────────────
 
@@ -136,7 +134,7 @@ def main():
                    help="Compression level (1-9, higher = more compression)")
     args = p.parse_args()
     
-    print("Using zarr-based streaming compression for memory efficiency")
+    print("Using HDF5-based streaming compression for memory efficiency")
 
     # Load .dm4 with lazy loading
     print(f"Loading {args.input} (lazy mode)...")
@@ -226,11 +224,11 @@ def main():
             processed_data = dask_data.astype("float32")
         pbar.update(1)
     
-    # Save to zarr
-    print(f"Saving to zarr format: {args.output}")
-    print(f"Compression: Blosc-zstd level {args.compression_level} with bit-shuffle")
+    # Save to HDF5
+    print(f"Saving to HDF5 format: {args.output}")
+    print(f"Compression: gzip level {args.compression_level}")
     
-    # Quick validation before long zarr write process
+    # Quick validation before conversion
     print(f"Pre-flight check:")
     print(f"  Data shape: {processed_data.shape}")  
     print(f"  Data chunks: {processed_data.chunks}")
@@ -244,54 +242,49 @@ def main():
         print(f"ERROR: Test slice failed: {e}")
         return
     
-    # Save to zarr with compression
-    print("Saving data to zarr...")
+    # Save to HDF5 with compression
+    print("Saving data to HDF5...")
     print("Note: This operation may take several minutes without progress updates")
     
-    # Use xarray for robust zarr writing (handles chunking automatically)
-    print("Using xarray to write zarr (handles chunking automatically)...")
+    # Change output extension to .h5
+    h5_output = str(args.output).replace('.zarr', '.h5')
     
-    # Remove existing zarr file/directory if it exists
-    import shutil
-    if Path(args.output).exists():
-        print(f"Removing existing zarr at {args.output}")
-        shutil.rmtree(args.output)
+    # Remove existing file if it exists
+    if Path(h5_output).exists():
+        print(f"Removing existing file at {h5_output}")
+        Path(h5_output).unlink()
     
-    # Create xarray Dataset with proper dimension names
-    ds = xr.Dataset({
-        'patterns': (['n', 'y', 'x'], processed_data)
-    }, coords={
-        'n': range(processed_data.shape[0]),
-        'y': range(processed_data.shape[1]), 
-        'x': range(processed_data.shape[2])
-    })
+    print("Converting dask array to numpy (this may take time)...")
+    numpy_data = processed_data.compute()
+    print(f"Converted to numpy: {numpy_data.shape}, dtype: {numpy_data.dtype}")
     
-    # Add metadata as attributes
-    ds.attrs.update({
-        'original_shape': original_shape,
-        'final_shape': processed_data.shape,
-        'data_min': float(data_min),
-        'data_max': float(data_max),
-        'data_range': float(data_range),
-        'dtype': args.dtype,
-        'downsample': args.downsample,
-        'scan_step': args.scan_step,
-        'mode': args.mode,
-        'sigma': args.sigma
-    })
+    # Save to HDF5 with compression
+    print("Writing to HDF5 with compression...")
+    with h5py.File(h5_output, 'w') as f:
+        # Create compressed dataset
+        dset = f.create_dataset('patterns', 
+                               data=numpy_data,
+                               compression='gzip', 
+                               compression_opts=args.compression_level,
+                               chunks=True,
+                               shuffle=True)
+        
+        # Store metadata as attributes
+        dset.attrs['original_shape'] = original_shape
+        dset.attrs['final_shape'] = numpy_data.shape
+        dset.attrs['data_min'] = float(data_min)
+        dset.attrs['data_max'] = float(data_max)
+        dset.attrs['data_range'] = float(data_range)
+        dset.attrs['dtype'] = args.dtype
+        dset.attrs['downsample'] = args.downsample
+        dset.attrs['scan_step'] = args.scan_step
+        dset.attrs['mode'] = args.mode
+        dset.attrs['sigma'] = args.sigma
     
-    # Configure encoding with compression
-    encoding = {
-        'patterns': {
-            'compressor': numcodecs.Blosc(cname="zstd", 
-                                        clevel=args.compression_level, 
-                                        shuffle=numcodecs.Blosc.BITSHUFFLE),
-            'chunks': (args.chunk_size, qy_final, qx_final)
-        }
-    }
+    print(f"HDF5 file saved successfully: {h5_output}")
     
-    # Save to zarr using xarray (robust, handles irregular chunks)
-    ds.to_zarr(str(args.output), encoding=encoding)
+    # Update args.output for metadata saving
+    args.output = Path(h5_output)
     
     # Save metadata for reconstruction
     metadata = {
