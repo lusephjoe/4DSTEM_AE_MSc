@@ -722,7 +722,7 @@ def main():
     # Load data and create datasets
     data_path = Path(args.data)
     full_dataset, detected_size = load_dataset(data_path, logger)
-    train_ds, val_ds = create_train_val_split(full_dataset, args.no_validation, logger)
+i    train_ds, val_ds = create_train_val_split(full_dataset, args.no_validation, logger)
     
     # Create data loaders and model
     train_dl, val_dl = create_data_loaders(train_ds, val_ds, args)
@@ -732,13 +732,25 @@ def main():
     loss_info = model.model.get_loss_info()
     logger.info("Loss Configuration:")
     logger.info(f"  Reconstruction loss: {loss_info['reconstruction']}")
-    if len([k for k in loss_info.keys() if k.startswith('regularization_')]) > 0:
+    
+    # Check for regularization losses
+    reg_losses = {k: v for k, v in loss_info.items() if k.startswith('regularization_')}
+    if reg_losses:
         logger.info("  Regularization losses:")
-        for key, value in loss_info.items():
-            if key.startswith('regularization_'):
-                reg_name = key.replace('regularization_', '')
-                weight = getattr(args, f'lambda_{reg_name.split("_")[0]}', 'N/A')
-                logger.info(f"    {value}: {weight}")
+        # Map regularization loss names to argument names
+        loss_to_arg_map = {
+            'l1_reg': 'lambda_act',
+            'l2_reg': 'lambda_l2', 
+            'contrastive_0.1': 'lambda_sim',
+            'divergence': 'lambda_div',
+            'kl_div_1.0': 'lambda_kl'
+        }
+        
+        for key, loss_name in reg_losses.items():
+            # Find the correct argument name based on loss name
+            arg_name = loss_to_arg_map.get(loss_name, 'lambda_act')  # default to lambda_act
+            weight = getattr(args, arg_name, 0)
+            logger.info(f"    {loss_name}: {weight}")
     else:
         logger.info("  No regularization losses configured")
     
