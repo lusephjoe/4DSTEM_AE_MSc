@@ -135,57 +135,68 @@ class HDF5Dataset(Dataset):
             self._compute_and_save_global_stats(stats_path)
     
     def _compute_and_save_global_stats(self, stats_path):
-        """Compute global log-space statistics efficiently using streaming approach."""
+        """Compute global log-space statistics efficiently using streaming approach over ENTIRE dataset."""
         total_patterns = self.shape[0]
         
-        # Use much smaller sample size for very large datasets to avoid hanging
-        n_samples = min(500, total_patterns // 10)  # Much smaller sample, but representative
-        print(f"Using {n_samples} samples to estimate global statistics from {total_patterns} total patterns...")
+        print(f"Computing normalization statistics from ALL {total_patterns} patterns (one-time cost)...")
+        print("Using optimized streaming approach with chunked processing...")
         
-        # Use evenly spaced indices instead of random for better coverage
-        step = max(1, total_patterns // n_samples)
-        indices = np.arange(0, total_patterns, step)[:n_samples]
+        # Optimized chunked processing parameters
+        chunk_size = min(1000, max(100, total_patterns // 1000))  # Adaptive chunk size
+        pixel_stride = 50  # Sample every 50th pixel for speed while maintaining accuracy
         
-        # Streaming computation to avoid memory issues
+        # Streaming computation using Welford's algorithm
         running_mean = 0.0
-        running_m2 = 0.0  # For variance calculation
+        running_m2 = 0.0  # For variance calculation  
         total_count = 0
         
-        print("Computing statistics with streaming approach...")
+        print(f"Processing in chunks of {chunk_size} patterns, sampling every {pixel_stride}th pixel...")
         
         # Open file temporarily for statistics computation
         with h5py.File(str(self.data_path), 'r') as temp_file:
             temp_arr = temp_file['patterns']
             
-            for i, idx in enumerate(indices):
-                if i % 100 == 0:  # More frequent updates
-                    print(f"Processing sample {i+1}/{len(indices)}... ({100*i/len(indices):.1f}%)")
+            # Process all patterns in chunks
+            for chunk_start in range(0, total_patterns, chunk_size):
+                chunk_end = min(chunk_start + chunk_size, total_patterns)
+                current_chunk_size = chunk_end - chunk_start
                 
-                    try:
-                        # Load single pattern
-                        pattern = np.array(temp_arr[idx])
-                        
-                        # Apply same dequantization as in training
-                        if self.metadata["dtype"] == "uint16":
-                            pattern = pattern.astype("float32") / 65535.0 * self.metadata["data_range"] + self.metadata["data_min"]
-                        elif self.metadata["dtype"] == "float16":
-                            pattern = pattern.astype("float32")
-                        
-                        # Apply log scaling
-                        log_pattern = np.log(pattern + 1e-6)
-                        
-                        # Use Welford's online algorithm for numerical stability and memory efficiency
-                        flat_pattern = log_pattern.flatten()
-                        for value in flat_pattern[::100]:  # Subsample pixels for speed (every 100th pixel)
-                            total_count += 1
-                            delta = value - running_mean
-                            running_mean += delta / total_count
-                            delta2 = value - running_mean
-                            running_m2 += delta * delta2
-                        
-                    except Exception as e:
-                        print(f"Warning: Failed to process pattern {idx}: {e}")
-                        continue
+                # Progress reporting
+                progress = (chunk_start / total_patterns) * 100
+                print(f"Processing chunk {chunk_start//chunk_size + 1}/{(total_patterns + chunk_size - 1)//chunk_size} "
+                      f"(patterns {chunk_start}-{chunk_end-1}, {progress:.1f}% complete)")
+                
+                try:
+                    # Load chunk of patterns (optimized: load entire chunk at once)
+                    chunk_data = np.array(temp_arr[chunk_start:chunk_end])
+                    
+                    # Apply same dequantization as in training (vectorized)
+                    if self.metadata["dtype"] == "uint16":
+                        chunk_data = chunk_data.astype("float32") / 65535.0 * self.metadata["data_range"] + self.metadata["data_min"]
+                    elif self.metadata["dtype"] == "float16":
+                        chunk_data = chunk_data.astype("float32")
+                    
+                    # Apply log scaling (vectorized)
+                    log_chunk = np.log(chunk_data + 1e-6)
+                    
+                    # Sample pixels efficiently: flatten all patterns then subsample
+                    flat_chunk = log_chunk.flatten()
+                    sampled_pixels = flat_chunk[::pixel_stride]
+                    
+                    # Update running statistics using Welford's algorithm (optimized for chunk processing)
+                    for value in sampled_pixels:
+                        total_count += 1
+                        delta = value - running_mean
+                        running_mean += delta / total_count
+                        delta2 = value - running_mean
+                        running_m2 += delta * delta2
+                    
+                    # Force garbage collection to free memory
+                    del chunk_data, log_chunk, flat_chunk, sampled_pixels
+                    
+                except Exception as e:
+                    print(f"Warning: Failed to process chunk {chunk_start}-{chunk_end}: {e}")
+                    continue
         
         # Finalize statistics
         self.global_log_mean = float(running_mean)
@@ -195,17 +206,20 @@ class HDF5Dataset(Dataset):
         stats = {
             'log_mean': self.global_log_mean,
             'log_std': self.global_log_std,
-            'n_samples_used': len(indices),
+            'total_patterns_used': total_patterns,
             'pixels_sampled': total_count,
+            'pixel_stride': pixel_stride,
+            'chunk_size': chunk_size,
             'computed_on': datetime.datetime.now().isoformat(),
-            'method': 'streaming_welford'
+            'method': 'full_dataset_streaming_welford'
         }
         
         with open(stats_path, 'w') as f:
             json.dump(stats, f, indent=2)
         
         print(f"Global stats computed and saved: mean={self.global_log_mean:.4f}, std={self.global_log_std:.4f}")
-        print(f"Used {len(indices)} patterns and {total_count} pixel samples")
+        print(f"Used ALL {total_patterns} patterns with {total_count} pixel samples (every {pixel_stride}th pixel)")
+        print(f"Statistics saved to: {stats_path}")
     
     def __len__(self):
         return self.shape[0]
