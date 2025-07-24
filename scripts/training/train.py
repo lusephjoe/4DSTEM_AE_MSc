@@ -722,7 +722,7 @@ def main():
     # Load data and create datasets
     data_path = Path(args.data)
     full_dataset, detected_size = load_dataset(data_path, logger)
-i    train_ds, val_ds = create_train_val_split(full_dataset, args.no_validation, logger)
+    train_ds, val_ds = create_train_val_split(full_dataset, args.no_validation, logger)
     
     # Create data loaders and model
     train_dl, val_dl = create_data_loaders(train_ds, val_ds, args)
