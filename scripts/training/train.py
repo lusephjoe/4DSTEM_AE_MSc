@@ -90,12 +90,34 @@ class HDF5Dataset(Dataset):
     
     def _ensure_file_open(self):
         """Ensure HDF5 file is open. Called lazily to avoid pickling issues."""
-        if self.h5_file is None:
+        if self.h5_file is None or not self.h5_file.id.valid:
             # OPTIMIZATION: Open HDF5 with optimized settings for better I/O performance
+            # This handles both initial opening and reopening in worker processes
             self.h5_file = h5py.File(str(self.data_path), 'r', 
                                    rdcc_nbytes=1024*1024*64,  # 64MB chunk cache
                                    rdcc_nslots=10007)         # More cache slots
             self.arr = self.h5_file['patterns']
+    
+    def __getstate__(self):
+        """Custom pickling to exclude HDF5 file handles."""
+        state = self.__dict__.copy()
+        # Remove unpicklable HDF5 objects
+        state['h5_file'] = None
+        state['arr'] = None
+        return state
+    
+    def __setstate__(self, state):
+        """Custom unpickling to restore state without HDF5 file handles."""
+        self.__dict__.update(state)
+        # HDF5 file will be reopened lazily in _ensure_file_open()
+        
+    def __del__(self):
+        """Ensure HDF5 file is properly closed."""
+        try:
+            if hasattr(self, 'h5_file') and self.h5_file is not None:
+                self.h5_file.close()
+        except:
+            pass  # Ignore errors during cleanup
     
     
     def _load_or_compute_global_stats(self):
@@ -330,14 +352,20 @@ def create_train_val_split(full_dataset, no_validation, logger):
 
 def create_data_loaders(train_ds, val_ds, args):
     """Create optimized training and validation data loaders."""
-    # OPTIMIZATION: Improve data loading performance
+    # OPTIMIZATION: Enable multiprocessing on Windows with proper HDF5 handling
     import platform
-    if platform.system() == 'Windows':
-        num_workers = 0  # Avoid multiprocessing on Windows due to HDF5 pickling issues
-        print("Windows detected: Using single-threaded data loading")
-        print("PERFORMANCE TIP: Consider moving HDF5 file to fast SSD for better I/O performance")
+    
+    # Use multiprocessing on all platforms - HDF5Dataset now handles pickling properly
+    num_workers = min(8, args.num_workers) if args.num_workers > 0 else 0
+    
+    if platform.system() == 'Windows' and num_workers > 0:
+        print(f"Windows detected: Enabling {num_workers} worker processes for faster data loading")
+        print("Using optimized HDF5 dataset with proper multiprocessing support")
+    elif num_workers == 0:
+        print("Single-threaded data loading enabled")
+        print("PERFORMANCE TIP: Use --num_workers 4 for faster data loading")
     else:
-        num_workers = min(8, args.num_workers)  # Optimal for most systems without overwhelming
+        print(f"Using {num_workers} worker processes for data loading")
     
     dataloader_kwargs = {
         'batch_size': args.batch,
@@ -351,18 +379,44 @@ def create_data_loaders(train_ds, val_ds, args):
     if num_workers > 0:
         dataloader_kwargs['prefetch_factor'] = 4  # Increase prefetch for better pipeline
     
-    # OPTIMIZATION: Add multiprocessing context for better performance on Unix systems
-    if num_workers > 0 and platform.system() != 'Windows':
+    # OPTIMIZATION: Use spawn context for all platforms for better HDF5 compatibility
+    if num_workers > 0:
         import multiprocessing as mp
-        dataloader_kwargs['multiprocessing_context'] = mp.get_context('spawn')
+        if platform.system() == 'Windows':
+            # Windows always uses spawn, so this is explicit
+            dataloader_kwargs['multiprocessing_context'] = mp.get_context('spawn')
+        else:
+            # Use spawn on Unix too for consistent HDF5 behavior
+            dataloader_kwargs['multiprocessing_context'] = mp.get_context('spawn')
     
-    train_dl = DataLoader(train_ds, shuffle=True, **dataloader_kwargs)
-    val_dl = DataLoader(val_ds, shuffle=False, **dataloader_kwargs) if val_ds else None
+    # Create data loaders with error handling
+    try:
+        train_dl = DataLoader(train_ds, shuffle=True, **dataloader_kwargs)
+        val_dl = DataLoader(val_ds, shuffle=False, **dataloader_kwargs) if val_ds else None
+        
+        # Test the data loader with a small batch to catch issues early
+        if num_workers > 0:
+            print("Testing multiprocessing data loader...")
+            test_batch = next(iter(train_dl))
+            print(f"✓ Multiprocessing test successful: batch shape {test_batch[0].shape}")
+            
+    except Exception as e:
+        print(f"ERROR: Multiprocessing data loading failed: {e}")
+        print("Falling back to single-threaded data loading...")
+        # Fallback to single-threaded
+        fallback_kwargs = dataloader_kwargs.copy()
+        fallback_kwargs['num_workers'] = 0
+        fallback_kwargs.pop('multiprocessing_context', None)
+        fallback_kwargs.pop('prefetch_factor', None)
+        fallback_kwargs['persistent_workers'] = False
+        
+        train_dl = DataLoader(train_ds, shuffle=True, **fallback_kwargs)
+        val_dl = DataLoader(val_ds, shuffle=False, **fallback_kwargs) if val_ds else None
+        num_workers = 0
     
-    print(f"Data loading config: batch_size={args.batch}, num_workers={num_workers}")
+    print(f"Final data loading config: batch_size={args.batch}, num_workers={num_workers}")
     if num_workers == 0:
-        print("WARNING: Single-threaded data loading may cause GPU underutilization")
-        print("Consider: 1) Using faster storage (NVMe SSD), 2) Increasing batch size, 3) Using --persistent_workers")
+        print("PERFORMANCE TIP: Consider using NVMe SSD storage for better single-threaded I/O")
     
     return train_dl, val_dl
 
