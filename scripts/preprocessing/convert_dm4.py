@@ -28,6 +28,7 @@ import dask.array as da
 import numcodecs
 import json
 from tqdm import tqdm
+import xarray as xr
 
 # ─────────────────────────── helpers ────────────────────────────
 
@@ -247,35 +248,44 @@ def main():
     print("Saving data to zarr...")
     print("Note: This operation may take several minutes without progress updates")
     
-    # Force uniform chunking by padding to exact multiple if needed
-    print("Ensuring uniform chunks for zarr 2.18.0 compatibility...")
-    total_patterns = processed_data.shape[0]
-    chunk_size = 64  # Use safe chunk size
+    # Use xarray for robust zarr writing (handles chunking automatically)
+    print("Using xarray to write zarr (handles chunking automatically)...")
     
-    # Pad to exact multiple of chunk_size to avoid irregular final chunk
-    remainder = total_patterns % chunk_size
-    if remainder != 0:
-        pad_size = chunk_size - remainder
-        print(f"Padding {pad_size} patterns to make total divisible by {chunk_size}")
-        
-        # Create padding with last pattern repeated
-        last_pattern = processed_data[-1:].repeat(pad_size, axis=0)
-        processed_data = da.concatenate([processed_data, last_pattern], axis=0)
-        total_patterns = processed_data.shape[0]
-        print(f"New total: {total_patterns} patterns")
+    # Create xarray Dataset with proper dimension names
+    ds = xr.Dataset({
+        'patterns': (['n', 'y', 'x'], processed_data)
+    }, coords={
+        'n': range(processed_data.shape[0]),
+        'y': range(processed_data.shape[1]), 
+        'x': range(processed_data.shape[2])
+    })
     
-    # Now rechunk with uniform sizes
-    processed_data = da.rechunk(processed_data, chunks=(chunk_size, qy_final, qx_final))
-    print(f"Chunked to uniform {chunk_size}-pattern chunks")
+    # Add metadata as attributes
+    ds.attrs.update({
+        'original_shape': original_shape,
+        'final_shape': processed_data.shape,
+        'data_min': float(data_min),
+        'data_max': float(data_max),
+        'data_range': float(data_range),
+        'dtype': args.dtype,
+        'downsample': args.downsample,
+        'scan_step': args.scan_step,
+        'mode': args.mode,
+        'sigma': args.sigma
+    })
     
-    # Use zarr 2.18.0 with da.to_zarr
-    compressor = numcodecs.Blosc(cname="zstd", 
-                                clevel=args.compression_level, 
-                                shuffle=numcodecs.Blosc.BITSHUFFLE)
+    # Configure encoding with compression
+    encoding = {
+        'patterns': {
+            'compressor': numcodecs.Blosc(cname="zstd", 
+                                        clevel=args.compression_level, 
+                                        shuffle=numcodecs.Blosc.BITSHUFFLE),
+            'chunks': (args.chunk_size, qy_final, qx_final)
+        }
+    }
     
-    da.to_zarr(processed_data, str(args.output), 
-               compressor=compressor, 
-               overwrite=True)
+    # Save to zarr using xarray (robust, handles irregular chunks)
+    ds.to_zarr(str(args.output), encoding=encoding)
     
     # Save metadata for reconstruction
     metadata = {

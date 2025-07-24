@@ -58,11 +58,22 @@ class ZarrDataset(Dataset):
     
     def __init__(self, zarr_path, metadata_path=None):
         self.zarr_path = Path(zarr_path)
-        self.arr = zarr.open(str(zarr_path), mode="r")
         
-        # Load metadata with fallback defaults
-        metadata_path = metadata_path or self.zarr_path.parent / f"{self.zarr_path.stem}_metadata.json"
-        self.metadata = self._load_metadata(metadata_path)
+        # Try to open as xarray dataset first, fallback to raw zarr
+        try:
+            import xarray as xr
+            ds = xr.open_zarr(str(zarr_path))
+            self.arr = ds.patterns.data  # Get the dask array
+            # Load metadata from xarray attributes
+            self.metadata = dict(ds.attrs) if hasattr(ds, 'attrs') else {}
+            print(f"Loaded xarray zarr dataset with metadata: {list(self.metadata.keys())}")
+        except:
+            # Fallback to raw zarr
+            self.arr = zarr.open(str(zarr_path), mode="r")
+            # Load metadata with fallback defaults
+            metadata_path = metadata_path or self.zarr_path.parent / f"{self.zarr_path.stem}_metadata.json"
+            self.metadata = self._load_metadata(metadata_path)
+            print(f"Loaded raw zarr dataset")
         
         # Load or compute global normalization statistics ONCE
         print("Loading/computing normalization statistics...")
