@@ -423,8 +423,8 @@ def create_data_loaders(train_ds, val_ds, args):
         train_dl = DataLoader(train_ds, shuffle=True, **dataloader_kwargs)
         val_dl = DataLoader(val_ds, shuffle=False, **dataloader_kwargs) if val_ds else None
         
-        # Test the data loader with a small batch to catch issues early
-        if num_workers > 0:
+        # Test the data loader with a small batch to catch issues early (debug mode only)
+        if num_workers > 0 and args.debug:
             print("Testing multiprocessing data loader...")
             test_batch = next(iter(train_dl))
             print(f"✓ Multiprocessing test successful: batch shape {test_batch[0].shape}")
@@ -459,29 +459,6 @@ def create_model(args, detected_size):
         loss_config, (detected_size, detected_size)
     )
 
-def generate_model_summary(model, train_dl, args):
-    """Generate model summary with memory optimization."""
-    try:
-        # Get a single sample to minimize memory usage
-        sample = next(iter(train_dl))
-        if isinstance(sample, (list, tuple)):
-            sample = sample[0]
-        
-        # Use only the first sample and ensure it's on the correct device
-        example = sample[:1].to(args.device)
-        model = model.to(args.device)
-        
-        # Generate summary with reduced memory footprint
-        show(model, example_input=example, output_dir=args.output_dir, include_evaluation=False)
-        
-        # Clean up GPU memory
-        del example, sample
-        if args.device == "cuda":
-            torch.cuda.empty_cache()
-            
-    except Exception as e:
-        print(f"Warning: Model summary generation failed: {e}")
-        print("Continuing with training...")
 
 def setup_trainer(args, base_name):
     """Setup PyTorch Lightning trainer with epoch checkpointing."""
@@ -684,7 +661,6 @@ def main():
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--gpus", type=int, default=1)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--summary", type=bool, default=True)
     p.add_argument("--realtime_metrics", action="store_true", help="Enable real-time metrics calculation during training (may slow down training)")
     # Loss function arguments  
     available_losses = get_available_losses()
@@ -705,6 +681,7 @@ def main():
     p.add_argument("--pin_memory", action="store_true", default=True, help="Pin memory for faster GPU transfer")
     p.add_argument("--persistent_workers", action="store_true", help="Keep workers alive between epochs")
     p.add_argument("--profile", action="store_true", help="Enable PyTorch profiler for performance analysis")
+    p.add_argument("--debug", action="store_true", help="Enable debug output including data loader tests")
     p.add_argument("--no_validation", action="store_true", help="Disable train/validation split - use entire dataset for training")
     p.add_argument("--save_every_n_epochs", type=int, default=1, help="Save checkpoint every N epochs (default: 1)")
     p.add_argument("--accumulate_grad_batches", type=int, default=1, help="Number of batches to accumulate gradients over (default: 1)")
@@ -769,8 +746,6 @@ def main():
     else:
         logger.info("  No regularization losses configured")
     
-    if args.summary:
-        generate_model_summary(model, train_dl, args)
 
     # Generate base name for consistent naming across all files
     timestamp = datetime.datetime.now().strftime("%m%d_%H%M")
