@@ -229,16 +229,43 @@ def main():
     print(f"Saving to zarr format: {args.output}")
     print(f"Compression: Blosc-zstd level {args.compression_level} with bit-shuffle")
     
+    # Quick validation before long zarr write process
+    print(f"Pre-flight check:")
+    print(f"  Data shape: {processed_data.shape}")  
+    print(f"  Data chunks: {processed_data.chunks}")
+    print(f"  Final chunk size: {processed_data.chunks[0][-1]} patterns")
+    
+    # Test a small slice to catch errors early
+    try:
+        test_slice = processed_data[:2].compute()
+        print(f"  Test slice successful: {test_slice.shape}, dtype: {test_slice.dtype}")
+    except Exception as e:
+        print(f"ERROR: Test slice failed: {e}")
+        return
+    
     # Save to zarr with compression
     print("Saving data to zarr...")
     print("Note: This operation may take several minutes without progress updates")
     
-    # Use zarr 2.0.0 with da.to_zarr - simple and efficient approach
+    # Rechunk to regular sizes to avoid zarr 2.18.0 irregular chunk issues
+    print("Rechunking to regular chunk sizes for zarr compatibility...")
+    # Use a chunk size that divides evenly into total patterns
+    total_patterns = processed_data.shape[0]
+    # Find a good chunk size that minimizes remainder
+    for chunk_size in [64, 100, 128, 256]:
+        if total_patterns % chunk_size < chunk_size // 4:  # Small remainder is ok
+            break
+    else:
+        chunk_size = 64  # Default safe size
+    
+    processed_data = da.rechunk(processed_data, chunks=(chunk_size, qy_final, qx_final))
+    print(f"Rechunked to {processed_data.chunks[0]} patterns per chunk")
+    
+    # Use zarr 2.18.0 with da.to_zarr
     compressor = numcodecs.Blosc(cname="zstd", 
                                 clevel=args.compression_level, 
                                 shuffle=numcodecs.Blosc.BITSHUFFLE)
     
-    # With zarr 2.0.0, da.to_zarr handles irregular chunks properly
     da.to_zarr(processed_data, str(args.output), 
                compressor=compressor, 
                overwrite=True)
