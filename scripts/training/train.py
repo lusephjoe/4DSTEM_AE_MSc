@@ -349,9 +349,12 @@ def create_data_loaders(train_ds, val_ds, args):
         'num_workers': num_workers,
         'pin_memory': args.pin_memory,
         'persistent_workers': args.persistent_workers and num_workers > 0,
-        'prefetch_factor': 2,  # Reduce prefetch to minimize memory usage
         'drop_last': True,     # Ensure consistent batch sizes for mixed precision
     }
+    
+    # Only set prefetch_factor if using multiprocessing
+    if num_workers > 0:
+        dataloader_kwargs['prefetch_factor'] = 2  # Reduce prefetch to minimize memory usage
     
     train_dl = DataLoader(train_ds, shuffle=True, **dataloader_kwargs)
     val_dl = DataLoader(val_ds, shuffle=False, **dataloader_kwargs) if val_ds else None
