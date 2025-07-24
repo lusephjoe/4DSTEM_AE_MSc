@@ -248,11 +248,15 @@ def main():
     
     # Change output extension to .h5
     h5_output = str(args.output).replace('.zarr', '.h5')
+    h5_output_path = Path(h5_output)
+    
+    # Create output directory if it doesn't exist
+    h5_output_path.parent.mkdir(parents=True, exist_ok=True)
     
     # Remove existing file if it exists
-    if Path(h5_output).exists():
+    if h5_output_path.exists():
         print(f"Removing existing file at {h5_output}")
-        Path(h5_output).unlink()
+        h5_output_path.unlink()
     
     print("Converting dask array to numpy (this may take time)...")
     numpy_data = processed_data.compute()
@@ -284,7 +288,7 @@ def main():
     print(f"HDF5 file saved successfully: {h5_output}")
     
     # Update args.output for metadata saving
-    args.output = Path(h5_output)
+    args.output = h5_output_path
     
     # Save metadata for reconstruction
     metadata = {

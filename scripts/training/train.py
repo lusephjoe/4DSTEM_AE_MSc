@@ -356,7 +356,7 @@ def create_data_loaders(train_ds, val_ds, args):
     import platform
     
     # Use multiprocessing on all platforms - HDF5Dataset now handles pickling properly
-    num_workers = min(8, args.num_workers) if args.num_workers > 0 else 0
+    num_workers = args.num_workers
     
     if platform.system() == 'Windows' and num_workers > 0:
         print(f"Windows detected: Enabling {num_workers} worker processes for faster data loading")
