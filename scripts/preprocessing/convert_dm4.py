@@ -251,6 +251,12 @@ def main():
     # Use xarray for robust zarr writing (handles chunking automatically)
     print("Using xarray to write zarr (handles chunking automatically)...")
     
+    # Remove existing zarr file/directory if it exists
+    import shutil
+    if Path(args.output).exists():
+        print(f"Removing existing zarr at {args.output}")
+        shutil.rmtree(args.output)
+    
     # Create xarray Dataset with proper dimension names
     ds = xr.Dataset({
         'patterns': (['n', 'y', 'x'], processed_data)
