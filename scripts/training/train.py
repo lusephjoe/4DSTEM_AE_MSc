@@ -460,13 +460,28 @@ def create_model(args, detected_size):
     )
 
 def generate_model_summary(model, train_dl, args):
-    """Generate model summary."""
-    sample = next(iter(train_dl))
-    if isinstance(sample, (list, tuple)):
-        sample = sample[0]
-    example = sample[:1].to(args.device)
-    model = model.to(args.device)
-    show(model, example_input=example, output_dir=args.output_dir, include_evaluation=False)
+    """Generate model summary with memory optimization."""
+    try:
+        # Get a single sample to minimize memory usage
+        sample = next(iter(train_dl))
+        if isinstance(sample, (list, tuple)):
+            sample = sample[0]
+        
+        # Use only the first sample and ensure it's on the correct device
+        example = sample[:1].to(args.device)
+        model = model.to(args.device)
+        
+        # Generate summary with reduced memory footprint
+        show(model, example_input=example, output_dir=args.output_dir, include_evaluation=False)
+        
+        # Clean up GPU memory
+        del example, sample
+        if args.device == "cuda":
+            torch.cuda.empty_cache()
+            
+    except Exception as e:
+        print(f"Warning: Model summary generation failed: {e}")
+        print("Continuing with training...")
 
 def setup_trainer(args, base_name):
     """Setup PyTorch Lightning trainer with epoch checkpointing."""
@@ -746,7 +761,7 @@ def main():
             'kl_div_1.0': 'lambda_kl'
         }
         
-        for key, loss_name in reg_losses.items():
+        for loss_name in reg_losses.values():
             # Find the correct argument name based on loss name
             arg_name = loss_to_arg_map.get(loss_name, 'lambda_act')  # default to lambda_act
             weight = getattr(args, arg_name, 0)
