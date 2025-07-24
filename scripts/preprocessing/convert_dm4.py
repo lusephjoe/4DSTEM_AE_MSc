@@ -247,19 +247,26 @@ def main():
     print("Saving data to zarr...")
     print("Note: This operation may take several minutes without progress updates")
     
-    # Rechunk to regular sizes to avoid zarr 2.18.0 irregular chunk issues
-    print("Rechunking to regular chunk sizes for zarr compatibility...")
-    # Use a chunk size that divides evenly into total patterns
+    # Force uniform chunking by padding to exact multiple if needed
+    print("Ensuring uniform chunks for zarr 2.18.0 compatibility...")
     total_patterns = processed_data.shape[0]
-    # Find a good chunk size that minimizes remainder
-    for chunk_size in [64, 100, 128, 256]:
-        if total_patterns % chunk_size < chunk_size // 4:  # Small remainder is ok
-            break
-    else:
-        chunk_size = 64  # Default safe size
+    chunk_size = 64  # Use safe chunk size
     
+    # Pad to exact multiple of chunk_size to avoid irregular final chunk
+    remainder = total_patterns % chunk_size
+    if remainder != 0:
+        pad_size = chunk_size - remainder
+        print(f"Padding {pad_size} patterns to make total divisible by {chunk_size}")
+        
+        # Create padding with last pattern repeated
+        last_pattern = processed_data[-1:].repeat(pad_size, axis=0)
+        processed_data = da.concatenate([processed_data, last_pattern], axis=0)
+        total_patterns = processed_data.shape[0]
+        print(f"New total: {total_patterns} patterns")
+    
+    # Now rechunk with uniform sizes
     processed_data = da.rechunk(processed_data, chunks=(chunk_size, qy_final, qx_final))
-    print(f"Rechunked to {processed_data.chunks[0]} patterns per chunk")
+    print(f"Chunked to uniform {chunk_size}-pattern chunks")
     
     # Use zarr 2.18.0 with da.to_zarr
     compressor = numcodecs.Blosc(cname="zstd", 
