@@ -454,10 +454,32 @@ def create_model(args, detected_size):
     # Create loss configuration from args
     loss_config = create_loss_config_from_args(args)
     
-    return LitAE(
+    model = LitAE(
         args.latent, args.lr, args.realtime_metrics,
         loss_config, (detected_size, detected_size)
     )
+    
+    # Apply torch.compile for Linux only (maximum efficiency)
+    if args.compile:
+        import platform
+        if platform.system() == 'Linux':
+            try:
+                print("🚀 Compiling model with torch.compile for maximum efficiency...")
+                model.model = torch.compile(
+                    model.model, 
+                    mode='max-autotune',  # Most aggressive optimization
+                    fullgraph=True,       # Compile entire graph for best performance
+                    dynamic=False         # Static shapes for maximum speed
+                )
+                print("✅ Model compilation successful!")
+            except Exception as e:
+                print(f"⚠️  Model compilation failed: {e}")
+                print("Continuing with uncompiled model...")
+        else:
+            print(f"⚠️  torch.compile only enabled on Linux (current OS: {platform.system()})")
+            print("Continuing with uncompiled model...")
+    
+    return model
 
 
 def setup_trainer(args, base_name):
