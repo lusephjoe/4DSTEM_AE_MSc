@@ -373,7 +373,29 @@ class LitAE(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
+        """Configure optimizer and learning rate scheduler (inspired by reference STEM_AE)."""
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
+        
+        # Check if scheduler is disabled
+        if getattr(self.hparams, 'no_scheduler', False):
+            return optimizer
+        
+        # Simple CyclicLR scheduler matching reference implementation
+        scheduler = torch.optim.lr_scheduler.CyclicLR(
+            optimizer,
+            base_lr=self.hparams.lr,           # Current learning rate as base
+            max_lr=self.hparams.lr * 3.33,    # Reference uses 1e-4 max with 3e-5 base
+            step_size_up=15,                  # Exactly as in reference
+            cycle_momentum=False              # Exactly as in reference
+        )
+        
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",  # Step every batch (matches reference)
+            }
+        }
 
 
 def load_dataset(data_path, logger):
@@ -720,6 +742,7 @@ def main():
     p.add_argument("--latent", type=int, default=128)
     p.add_argument("--device", type=str, default="auto", help="Device to use: auto, cpu, cuda, mps")
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--no_scheduler", action="store_true", help="Disable learning rate scheduler (CyclicLR enabled by default)")
     p.add_argument("--gpus", type=int, default=1)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--realtime_metrics", action="store_true", help="Enable real-time metrics calculation during training (may slow down training)")
@@ -789,6 +812,12 @@ def main():
     loss_info = model.model.get_loss_info()
     logger.info("Loss Configuration:")
     logger.info(f"  Reconstruction loss: {loss_info['reconstruction']}")
+    
+    # Log scheduler configuration
+    if args.no_scheduler:
+        logger.info("  Learning rate scheduler: DISABLED")
+    else:
+        logger.info(f"  Learning rate scheduler: CyclicLR (base={args.lr:.2e}, max={args.lr*3.33:.2e}, step_size=15)")
     
     # Check for regularization losses
     reg_losses = {k: v for k, v in loss_info.items() if k.startswith('regularization_')}
