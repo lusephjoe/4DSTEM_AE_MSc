@@ -13,11 +13,11 @@ from models.losses import create_loss_config_from_args, get_available_losses
 
 # Suppress stem_visualization warnings once at import
 try:
-    from models.summary import show, calculate_metrics
+    from models.summary import show, calculate_metrics, calculate_diffraction_metrics
 except ImportError:
     import warnings
     warnings.filterwarnings("ignore", message=".*stem_visualization.*")
-    from models.summary import show, calculate_metrics
+    from models.summary import show, calculate_metrics, calculate_diffraction_metrics
 import h5py
 import json
 import datetime
@@ -280,17 +280,35 @@ class LitAE(pl.LightningModule):
                 'divergence': 2e-4
             }
         }
+        
+        # Normalization parameters for scale-aligned loss computation
+        # These will be set by the data loader
+        self.register_buffer('global_log_mean', torch.tensor(0.0))
+        self.register_buffer('global_log_std', torch.tensor(1.0))
 
     def forward(self, x):
         return self.model(x)
+    
+    def denormalize_to_log_space(self, x_normalized: torch.Tensor) -> torch.Tensor:
+        """Convert normalized tensor back to log space for scale-aligned loss computation."""
+        return x_normalized * (self.global_log_std + 1e-8) + self.global_log_mean
+    
+    def set_normalization_params(self, log_mean: float, log_std: float):
+        """Set normalization parameters from data loader."""
+        self.global_log_mean.data = torch.tensor(log_mean)
+        self.global_log_std.data = torch.tensor(log_std)
 
     def training_step(self, batch, batch_idx):
         x, = batch
         z = self.model.embed(x)
         x_hat = self.model.decoder(z)
         
-        # Compute loss using flexible loss system
-        loss_dict = self.model.compute_loss(x, x_hat, z)
+        # SCALE-ALIGNED LOSS: Denormalize both input and output to log space
+        x_log = self.denormalize_to_log_space(x)
+        x_hat_log = self.denormalize_to_log_space(x_hat)
+        
+        # Compute loss using flexible loss system in aligned log space
+        loss_dict = self.model.compute_loss(x_log, x_hat_log, z)
         loss = loss_dict['total_loss']
 
         # OPTIMIZATION: Record losses much less frequently to reduce CPU-GPU sync
@@ -313,12 +331,17 @@ class LitAE(pl.LightningModule):
         z = self.model.embed(x)
         x_hat = self.model.decoder(z)
         
-        # Compute loss using flexible loss system
-        loss_dict = self.model.compute_loss(x, x_hat, z)
+        # SCALE-ALIGNED LOSS: Denormalize both input and output to log space
+        x_log = self.denormalize_to_log_space(x)
+        x_hat_log = self.denormalize_to_log_space(x_hat)
+        
+        # Compute loss using flexible loss system in aligned log space
+        loss_dict = self.model.compute_loss(x_log, x_hat_log, z)
         loss = loss_dict['total_loss']
         
-        # Calculate detailed metrics for validation
-        metrics = calculate_metrics(x, x_hat)
+        # Calculate detailed metrics for validation (use denormalized data)
+        metrics = calculate_metrics(x_log, x_hat_log)
+        diffraction_metrics = calculate_diffraction_metrics(x_log, x_hat_log)
         
         self.log("val_loss", loss, prog_bar=True)
         
@@ -330,6 +353,20 @@ class LitAE(pl.LightningModule):
         
         self.log("val_psnr", metrics['psnr'], prog_bar=True)
         self.log("val_ssim", metrics['ssim'], prog_bar=True)
+        
+        # Log domain-specific diffraction metrics
+        self.log("val_peak_preservation", diffraction_metrics['peak_preservation'], prog_bar=False)
+        self.log("val_log_correlation", diffraction_metrics['log_correlation'], prog_bar=False)
+        self.log("val_range_preservation", diffraction_metrics['range_preservation'], prog_bar=False)
+        self.log("val_center_mse", diffraction_metrics['center_region_mse'], prog_bar=False)
+        
+        # Store validation metrics for potential use
+        self.validation_metrics = {
+            'loss': loss.item(),
+            'psnr': metrics['psnr'],
+            'ssim': metrics['ssim'],
+            **diffraction_metrics  # Include all diffraction metrics
+        }
         
         return loss
 
@@ -741,6 +778,10 @@ def main():
     # Create data loaders and model
     train_dl, val_dl = create_data_loaders(train_ds, val_ds, args)
     model = create_model(args, detected_size)
+    
+    # SCALE-ALIGNED LOSS: Set normalization parameters from dataset
+    model.set_normalization_params(train_ds.global_log_mean, train_ds.global_log_std)
+    logger.info(f"Scale-aligned loss enabled: log_mean={train_ds.global_log_mean:.4f}, log_std={train_ds.global_log_std:.4f}")
     
     # Log loss configuration
     loss_info = model.model.get_loss_info()

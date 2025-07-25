@@ -80,6 +80,78 @@ def _is_leaf_module(module: nn.Module) -> bool:
     # A module is a leaf if it has parameters but no child modules with parameters
     return has_params and not has_child_with_params
 
+def calculate_diffraction_metrics(original: torch.Tensor, reconstructed: torch.Tensor) -> dict:
+    """Calculate domain-specific metrics for log-scaled diffraction patterns."""
+    # Convert to numpy and handle batch dimension
+    orig_np = original.detach().cpu().numpy()
+    recon_np = reconstructed.detach().cpu().numpy()
+    
+    # Handle batch dimension 
+    if orig_np.ndim == 4:  # (batch, channels, height, width)
+        orig_np = orig_np.squeeze(1)  # Remove channel dimension
+        recon_np = recon_np.squeeze(1)
+    
+    batch_size = orig_np.shape[0]
+    metrics = []
+    
+    for i in range(batch_size):
+        orig_pattern = orig_np[i]
+        recon_pattern = recon_np[i]
+        
+        # Convert from log space to intensity space for physical interpretation
+        orig_intensity = np.exp(orig_pattern) - 1e-6  # Inverse of log(x + 1e-6)
+        recon_intensity = np.exp(recon_pattern) - 1e-6
+        
+        # Ensure non-negative intensities
+        orig_intensity = np.maximum(orig_intensity, 0)
+        recon_intensity = np.maximum(recon_intensity, 0)
+        
+        # Domain-specific metrics
+        pattern_metrics = {}
+        
+        # 1. Peak intensity preservation (critical for diffraction analysis)
+        orig_max = np.max(orig_intensity)
+        recon_max = np.max(recon_intensity)
+        peak_preservation = min(recon_max / (orig_max + 1e-8), orig_max / (recon_max + 1e-8))
+        pattern_metrics['peak_preservation'] = peak_preservation
+        
+        # 2. Log-space correlation (more relevant than linear correlation for log data)
+        log_correlation = np.corrcoef(orig_pattern.flatten(), recon_pattern.flatten())[0, 1]
+        pattern_metrics['log_correlation'] = log_correlation if not np.isnan(log_correlation) else 0.0
+        
+        # 3. Intensity-weighted MSE (emphasizes high-intensity regions)
+        intensity_weights = orig_intensity / (np.mean(orig_intensity) + 1e-8)
+        weighted_mse = np.mean(intensity_weights * (orig_intensity - recon_intensity) ** 2)
+        pattern_metrics['weighted_mse'] = weighted_mse
+        
+        # 4. Dynamic range preservation
+        orig_range = np.max(orig_intensity) - np.min(orig_intensity)
+        recon_range = np.max(recon_intensity) - np.min(recon_intensity)
+        range_preservation = min(recon_range / (orig_range + 1e-8), orig_range / (recon_range + 1e-8))
+        pattern_metrics['range_preservation'] = range_preservation
+        
+        # 5. Central peak quality (important for diffraction patterns)
+        center_y, center_x = np.array(orig_pattern.shape) // 2
+        center_region = 16  # 32x32 pixel region around center
+        y1, y2 = max(0, center_y - center_region), min(orig_pattern.shape[0], center_y + center_region)
+        x1, x2 = max(0, center_x - center_region), min(orig_pattern.shape[1], center_x + center_region)
+        
+        orig_center = orig_pattern[y1:y2, x1:x2]
+        recon_center = recon_pattern[y1:y2, x1:x2]
+        center_mse = np.mean((orig_center - recon_center) ** 2)
+        pattern_metrics['center_region_mse'] = center_mse
+        
+        metrics.append(pattern_metrics)
+    
+    # Average across batch
+    averaged_metrics = {}
+    for key in metrics[0].keys():
+        values = [m[key] for m in metrics]
+        averaged_metrics[key] = np.mean(values)
+        averaged_metrics[f'{key}_std'] = np.std(values)
+    
+    return averaged_metrics
+
 def calculate_metrics(original: torch.Tensor, reconstructed: torch.Tensor) -> dict:
     """Calculate reconstruction metrics between original and reconstructed images."""
     # Convert to numpy and handle batch dimension
