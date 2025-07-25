@@ -303,7 +303,8 @@ class LitAE(pl.LightningModule):
         z = self.model.embed(x)
         x_hat = self.model.decoder(z)
         
-        # SCALE-ALIGNED LOSS: Denormalize both input and output to log space
+        # SCALE-ALIGNED LOSS: Denormalize BOTH input and output to log space
+        # Both x and x_hat are in normalized space, so both need denormalization
         x_log = self.denormalize_to_log_space(x)
         x_hat_log = self.denormalize_to_log_space(x_hat)
         
@@ -331,7 +332,8 @@ class LitAE(pl.LightningModule):
         z = self.model.embed(x)
         x_hat = self.model.decoder(z)
         
-        # SCALE-ALIGNED LOSS: Denormalize both input and output to log space
+        # SCALE-ALIGNED LOSS: Denormalize BOTH input and output to log space
+        # Both x and x_hat are in normalized space, so both need denormalization
         x_log = self.denormalize_to_log_space(x)
         x_hat_log = self.denormalize_to_log_space(x_hat)
         
