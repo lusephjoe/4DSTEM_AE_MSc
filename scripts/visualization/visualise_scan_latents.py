@@ -195,8 +195,14 @@ def main():
         best_factors = min(factors, key=lambda x: abs(x[0] - x[1]))
         return best_factors
     
-    if args.coords is not None:
-        # Load coordinates from separate file
+    # Priority 1: Use explicit --scan dimensions if provided
+    if args.scan is not None:
+        Ny, Nx = args.scan
+        coords = np.stack(np.unravel_index(np.arange(N), (Ny, Nx)), axis=-1)
+        print(f"Using explicit scan dimensions: {Ny} x {Nx}")
+        
+    elif args.coords is not None:
+        # Priority 2: Load coordinates from separate file
         if args.coords.suffix == ".npz":
             coord_data = np.load(args.coords)
             if 'spatial_coordinates' in coord_data:
@@ -222,7 +228,7 @@ def main():
             Nx = int(coords[:, 1].max()) + 1
             
     elif args.latents.suffix == ".npz":
-        # Check if latents file contains spatial coordinates
+        # Priority 3: Check if latents file contains spatial coordinates
         latent_data = np.load(args.latents)
         if 'spatial_coordinates' in latent_data:
             coords = latent_data['spatial_coordinates']
@@ -238,22 +244,16 @@ def main():
                 Nx = int(coords[:, 1].max()) + 1
                 print("Using spatial coordinates from latents .npz file")
         else:
-            # Auto-detect or use provided scan dimensions
-            if args.scan is None:
-                print(f"Auto-detecting scan shape for {N} patterns...")
-                Ny, Nx = auto_detect_scan_shape(N)
-                print(f"Detected scan shape: {Ny} x {Nx}")
-            else:
-                Ny, Nx = args.scan
-            coords = np.stack(np.unravel_index(np.arange(N), (Ny, Nx)), axis=-1)
-    else:
-        # Auto-detect or use provided scan dimensions
-        if args.scan is None:
+            # Priority 4: Auto-detect scan dimensions
             print(f"Auto-detecting scan shape for {N} patterns...")
             Ny, Nx = auto_detect_scan_shape(N)
             print(f"Detected scan shape: {Ny} x {Nx}")
-        else:
-            Ny, Nx = args.scan
+            coords = np.stack(np.unravel_index(np.arange(N), (Ny, Nx)), axis=-1)
+    else:
+        # Priority 4: Auto-detect scan dimensions
+        print(f"Auto-detecting scan shape for {N} patterns...")
+        Ny, Nx = auto_detect_scan_shape(N)
+        print(f"Detected scan shape: {Ny} x {Nx}")
         coords = np.stack(np.unravel_index(np.arange(N), (Ny, Nx)), axis=-1)
     
     print(f"Final scan dimensions: {Ny} x {Nx} = {Ny*Nx} (data has {N} patterns)")
