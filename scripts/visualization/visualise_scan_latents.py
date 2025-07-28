@@ -145,7 +145,7 @@ def parse():
     p.add_argument("--latents", required=True, type=Path,
                    help="Latent embeddings: .pt, .npy, or .npz format")
     p.add_argument("--scan", nargs=2, type=int, metavar=("Ny", "Nx"),
-                   help="Scan grid dimensions (required if no spatial coordinates in files)")
+                   help="Scan grid dimensions (optional - will auto-detect if not provided)")
     p.add_argument("--coords", type=Path,
                    help="Optional .npy (N,2) (y,x) coordinates for irregular scan")
     p.add_argument("--virtual", choices=["bf", "df"], default="bf",
@@ -169,7 +169,32 @@ def main():
     Z = load_tensor(args.latents)        # (N, latent_dim)
     N = raw.shape[0]
 
-    # coordinates & mapping ---------------------------------------------------
+    # coordinates & mapping with automatic shape detection ------------------
+    def auto_detect_scan_shape(n_patterns):
+        """Automatically detect most likely scan shape from number of patterns."""
+        # Try perfect squares first
+        sqrt_n = int(np.sqrt(n_patterns))
+        if sqrt_n * sqrt_n == n_patterns:
+            return sqrt_n, sqrt_n
+        
+        # Try common rectangular ratios
+        for ratio in [1.0, 4/3, 3/2, 16/9, 2/1]:
+            for ny in range(1, int(np.sqrt(n_patterns * ratio)) + 1):
+                if n_patterns % ny == 0:
+                    nx = n_patterns // ny
+                    if abs(nx/ny - ratio) < 0.1:  # Close to desired ratio
+                        return ny, nx
+        
+        # Fall back to factorization
+        factors = []
+        for i in range(1, int(np.sqrt(n_patterns)) + 1):
+            if n_patterns % i == 0:
+                factors.append((i, n_patterns // i))
+        
+        # Choose factors closest to square
+        best_factors = min(factors, key=lambda x: abs(x[0] - x[1]))
+        return best_factors
+    
     if args.coords is not None:
         # Load coordinates from separate file
         if args.coords.suffix == ".npz":
@@ -185,28 +210,53 @@ def main():
                 print(f"Warning: Using '{keys[0]}' as coordinates from .npz file")
         else:
             coords = np.load(args.coords)    # (N,2) float32 (y,x)
-        Ny = int(coords[:, 0].max()) + 1
-        Nx = int(coords[:, 1].max()) + 1
+        
+        # Validate coordinates against actual data size
+        if len(coords) != N:
+            print(f"Warning: Coordinate count ({len(coords)}) != pattern count ({N})")
+            print("Falling back to automatic shape detection")
+            Ny, Nx = auto_detect_scan_shape(N)
+            coords = np.stack(np.unravel_index(np.arange(N), (Ny, Nx)), axis=-1)
+        else:
+            Ny = int(coords[:, 0].max()) + 1
+            Nx = int(coords[:, 1].max()) + 1
+            
     elif args.latents.suffix == ".npz":
         # Check if latents file contains spatial coordinates
         latent_data = np.load(args.latents)
         if 'spatial_coordinates' in latent_data:
             coords = latent_data['spatial_coordinates']
-            Ny = int(coords[:, 0].max()) + 1
-            Nx = int(coords[:, 1].max()) + 1
-            print("Using spatial coordinates from latents .npz file")
+            
+            # Validate coordinates against actual data size
+            if len(coords) != N:
+                print(f"Warning: Coordinate count ({len(coords)}) != pattern count ({N})")
+                print("Falling back to automatic shape detection")
+                Ny, Nx = auto_detect_scan_shape(N)
+                coords = np.stack(np.unravel_index(np.arange(N), (Ny, Nx)), axis=-1)
+            else:
+                Ny = int(coords[:, 0].max()) + 1
+                Nx = int(coords[:, 1].max()) + 1
+                print("Using spatial coordinates from latents .npz file")
         else:
-            # Fall back to scan dimensions
+            # Auto-detect or use provided scan dimensions
             if args.scan is None:
-                raise ValueError("Must provide --scan dimensions when no spatial coordinates available")
-            Ny, Nx = args.scan
+                print(f"Auto-detecting scan shape for {N} patterns...")
+                Ny, Nx = auto_detect_scan_shape(N)
+                print(f"Detected scan shape: {Ny} x {Nx}")
+            else:
+                Ny, Nx = args.scan
             coords = np.stack(np.unravel_index(np.arange(N), (Ny, Nx)), axis=-1)
     else:
-        # Use provided scan dimensions
+        # Auto-detect or use provided scan dimensions
         if args.scan is None:
-            raise ValueError("Must provide --scan dimensions when no coordinates available")
-        Ny, Nx = args.scan
+            print(f"Auto-detecting scan shape for {N} patterns...")
+            Ny, Nx = auto_detect_scan_shape(N)
+            print(f"Detected scan shape: {Ny} x {Nx}")
+        else:
+            Ny, Nx = args.scan
         coords = np.stack(np.unravel_index(np.arange(N), (Ny, Nx)), axis=-1)
+    
+    print(f"Final scan dimensions: {Ny} x {Nx} = {Ny*Nx} (data has {N} patterns)")
 
     # 2. Build background images ---------------------------------------------
     # raw-average (mean over diffraction pattern)
