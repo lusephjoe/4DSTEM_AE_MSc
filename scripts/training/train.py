@@ -328,22 +328,42 @@ class LitAE(pl.LightningModule):
         loss_dict = self.model.compute_loss(x_log, x_hat_log, z)
         loss = loss_dict['total_loss']
 
-        # ADDITIONAL: Compute MSE in input space for comparison with reference papers
+        # COMPREHENSIVE MSE REPORTING: Multiple metrics for complete assessment
         if self.use_normalization:
-            mse_input_space = torch.mean((x - x_hat)**2)  # Normalized space MSE
+            # Normalized space metrics
+            mse_input_space = torch.mean((x - x_hat)**2)
+            
+            # Additional context metrics
+            mae_input_space = torch.mean(torch.abs(x - x_hat))
+            max_error = torch.max(torch.abs(x - x_hat))
+            
         else:
-            mse_input_space = torch.mean((x - x_hat)**2)  # Log space MSE (reference-like)
+            # Log space metrics (reference-comparable)
+            mse_input_space = torch.mean((x - x_hat)**2)
+            
+            # Additional context metrics for log space
+            mae_input_space = torch.mean(torch.abs(x - x_hat))
+            max_error = torch.max(torch.abs(x - x_hat))
+            
+            # Relative error as percentage of data range
+            data_range = torch.max(x) - torch.min(x)
+            relative_rmse_pct = 100 * torch.sqrt(mse_input_space) / (data_range + 1e-8)
 
         # OPTIMIZATION: Record losses much less frequently to reduce CPU-GPU sync
         if batch_idx % 50 == 0:  # Reduced from every 10 steps
             self.train_losses.append(loss.detach().cpu().item())
 
-        # Log essential metrics only
+        # Log essential metrics with proper context
         self.log("train_loss", loss, prog_bar=True)
         if self.use_normalization:
-            self.log("train_mse_normalized", mse_input_space, prog_bar=True)  # Normalized space MSE
+            self.log("train_mse_normalized", mse_input_space, prog_bar=True)
+            self.log("train_mae_normalized", mae_input_space, prog_bar=False)
+            self.log("train_max_error_normalized", max_error, prog_bar=False)
         else:
-            self.log("train_mse_log", mse_input_space, prog_bar=True)  # Log space MSE (reference-like)
+            self.log("train_mse_log", mse_input_space, prog_bar=True)
+            self.log("train_mae_log", mae_input_space, prog_bar=False)
+            self.log("train_max_error_log", max_error, prog_bar=False)
+            self.log("train_rmse_pct", relative_rmse_pct, prog_bar=True)  # Key context metric
         
         # Log main reconstruction loss (dynamically based on loss type)
         recon_loss_key = f"{self.model.loss_manager.reconstruction_loss.name}_loss"
@@ -372,21 +392,42 @@ class LitAE(pl.LightningModule):
         loss_dict = self.model.compute_loss(x_log, x_hat_log, z)
         loss = loss_dict['total_loss']
         
-        # ADDITIONAL: Compute MSE in input space for comparison with reference papers
+        # COMPREHENSIVE MSE REPORTING: Multiple metrics for complete assessment
         if self.use_normalization:
-            mse_input_space = torch.mean((x - x_hat)**2)  # Normalized space MSE
+            # Normalized space metrics
+            mse_input_space = torch.mean((x - x_hat)**2)
+            
+            # Additional context metrics
+            mae_input_space = torch.mean(torch.abs(x - x_hat))
+            max_error = torch.max(torch.abs(x - x_hat))
+            
         else:
-            mse_input_space = torch.mean((x - x_hat)**2)  # Log space MSE (reference-like)
+            # Log space metrics (reference-comparable)
+            mse_input_space = torch.mean((x - x_hat)**2)
+            
+            # Additional context metrics for log space
+            mae_input_space = torch.mean(torch.abs(x - x_hat))
+            max_error = torch.max(torch.abs(x - x_hat))
+            
+            # Relative error as percentage of data range
+            data_range = torch.max(x) - torch.min(x)
+            relative_rmse_pct = 100 * torch.sqrt(mse_input_space) / (data_range + 1e-8)
         
         # Calculate detailed metrics for validation (use denormalized data)
         metrics = calculate_metrics(x_log, x_hat_log)
         diffraction_metrics = calculate_diffraction_metrics(x_log, x_hat_log)
         
+        # Log comprehensive validation metrics
         self.log("val_loss", loss, prog_bar=True)
         if self.use_normalization:
-            self.log("val_mse_normalized", mse_input_space, prog_bar=True)  # Normalized space MSE
+            self.log("val_mse_normalized", mse_input_space, prog_bar=True)
+            self.log("val_mae_normalized", mae_input_space, prog_bar=False)
+            self.log("val_max_error_normalized", max_error, prog_bar=False)
         else:
-            self.log("val_mse_log", mse_input_space, prog_bar=True)  # Log space MSE (reference-like)
+            self.log("val_mse_log", mse_input_space, prog_bar=True)
+            self.log("val_mae_log", mae_input_space, prog_bar=False)
+            self.log("val_max_error_log", max_error, prog_bar=False)
+            self.log("val_rmse_pct", relative_rmse_pct, prog_bar=True)  # Key context metric
         
         # Log main reconstruction loss (dynamically based on loss type)
         recon_loss_key = f"{self.model.loss_manager.reconstruction_loss.name}_loss"
@@ -661,6 +702,45 @@ def train_model(trainer, model, train_dl, val_dl, logger, start_time, resume_che
     training_duration = training_end_time - start_time
     logger.info(f"Training completed at: {training_end_time.strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"Training duration: {training_duration}")
+    
+    # Print comprehensive loss reporting for publication/sharing
+    print("\n" + "="*80)
+    print("COMPREHENSIVE LOSS REPORT")
+    print("="*80)
+    
+    if train_ds.use_normalization:
+        print("Training mode: Normalized data (z-score normalized log space)")
+        print("Data preprocessing: raw → log(x+1) → z-score normalize")
+        print(f"Normalization stats: mean={train_ds.global_log_mean:.6f}, std={train_ds.global_log_std:.6f}")
+        print("\nKey metrics for reporting:")
+        print("- train_mse_normalized: MSE in normalized space")
+        print("- train_mae_normalized: Mean Absolute Error in normalized space")
+        print("- train_loss: Scale-aligned loss in log space (optimization loss)")
+    else:
+        print("Training mode: Direct log space training (reference-comparable)")
+        print("Data preprocessing: raw → log(x+1)")
+        print(f"Log data range: 0 to ~1.01 (typical for diffraction patterns)")
+        print("\nKey metrics for reporting:")
+        print("- train_mse_log: MSE in log space (directly comparable to reference papers)")
+        print("- train_mae_log: Mean Absolute Error in log space")
+        print("- train_rmse_pct: Root MSE as percentage of data range (quality indicator)")
+        print("- train_loss: Same as train_mse_log (since no denormalization needed)")
+        
+        print(f"\nInterpretation guide for train_rmse_pct:")
+        print(f"- < 5%: Excellent reconstruction quality")
+        print(f"- 5-10%: Good reconstruction quality") 
+        print(f"- 10-20%: Moderate reconstruction quality")
+        print(f"- > 20%: Poor reconstruction quality")
+    
+    print(f"\nDataset info:")
+    print(f"- Input size: {detected_size}x{detected_size}")
+    print(f"- Total patterns: {len(train_ds)}")
+    print(f"- Training patterns: {len(train_ds)}")
+    if val_ds:
+        print(f"- Validation patterns: {len(val_ds)}")
+    
+    print("="*80)
+    
     return training_duration
 
 def save_model_and_results(trainer, model, args, logger, base_name):
