@@ -748,11 +748,11 @@ def main():
                 if args.debug and batch_idx >= 2:
                     print("Debug mode: stopping after 3 batches")
                     break
-                
-    except Exception as e:
-        print(f"\nError during batch processing: {e}")
-        print(f"Failed at batch {batch_idx}")
-        raise e
+                    
+        except Exception as e:
+            print(f"\nError during batch processing: {e}")
+            print(f"Failed at batch {batch_idx}")
+            raise e
     
     progress_bar.close()
     
