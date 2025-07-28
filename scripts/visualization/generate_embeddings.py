@@ -79,12 +79,14 @@ def parse_args():
                    help="Disable torch.compile optimization")
     
     # Performance arguments
-    p.add_argument("--num_workers", type=int, default=0,  # Default to 0 for safety
-                   help="Number of data loader workers (0=single-threaded, safer on Windows)")
-    p.add_argument("--prefetch_factor", type=int, default=2,
+    p.add_argument("--num_workers", type=int, default=4,  # Default to 4 like training
+                   help="Number of data loader workers (4=default, same as training)")
+    p.add_argument("--prefetch_factor", type=int, default=4,  # Same as training
                    help="Number of batches to prefetch per worker")
-    p.add_argument("--persistent_workers", action="store_true",
-                   help="Keep workers alive between batches (only with num_workers > 0)")
+    p.add_argument("--persistent_workers", action="store_true", default=True,
+                   help="Keep workers alive between batches (default: True for better performance)")
+    p.add_argument("--no_persistent_workers", action="store_true",
+                   help="Disable persistent workers")
     p.add_argument("--optimize_memory", action="store_true",
                    help="Enable memory optimizations for large datasets")
     p.add_argument("--auto_batch_size", action="store_true",
@@ -356,8 +358,10 @@ def load_data(args) -> Tuple[torch.utils.data.DataLoader, Optional[np.ndarray], 
     if platform.system() == 'Windows' and num_workers > 0:
         print(f"Windows detected: Enabling {num_workers} worker processes for faster data loading")
         print("Using optimized HDF5 dataset with proper multiprocessing support")
+        print("💡 For even faster loading, try --num_workers 8 or --num_workers 12")
     elif num_workers == 0:
         print("Single-threaded data loading enabled")
+        print("⚠️  Performance will be slow! Recommend --num_workers 4 for faster loading")
     else:
         print(f"Using {num_workers} worker processes for data loading")
     
