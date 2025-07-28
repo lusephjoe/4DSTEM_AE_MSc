@@ -79,8 +79,8 @@ def parse_args():
                    help="Disable torch.compile optimization")
     
     # Performance arguments
-    p.add_argument("--num_workers", type=int, default=4,
-                   help="Number of data loader workers")
+    p.add_argument("--num_workers", type=int, default=0,  # Default to 0 for safety
+                   help="Number of data loader workers (0=single-threaded, safer on Windows)")
     p.add_argument("--prefetch_factor", type=int, default=2,
                    help="Number of batches to prefetch per worker")
     p.add_argument("--optimize_memory", action="store_true",
@@ -97,6 +97,8 @@ def parse_args():
                    help="Save spatial coordinates (for HDF5 data)")
     p.add_argument("--save_metadata", action="store_true", default=True,
                    help="Save comprehensive metadata")
+    p.add_argument("--debug", action="store_true",
+                   help="Enable debug output for troubleshooting")
     
     return p.parse_args()
 
@@ -345,17 +347,74 @@ def load_data(args) -> Tuple[torch.utils.data.DataLoader, Optional[np.ndarray], 
     
     print(f"Loaded {len(dataset)} samples")
     
-    # Create DataLoader
-    loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        pin_memory=True,
-        num_workers=args.num_workers,
-        prefetch_factor=args.prefetch_factor,
-        persistent_workers=True if args.num_workers > 0 else False,
-        drop_last=False
-    )
+    # Create DataLoader using the EXACT same approach as training (which works)
+    import platform
+    num_workers = args.num_workers
+    
+    if platform.system() == 'Windows' and num_workers > 0:
+        print(f"Windows detected: Enabling {num_workers} worker processes for faster data loading")
+        print("Using optimized HDF5 dataset with proper multiprocessing support")
+    elif num_workers == 0:
+        print("Single-threaded data loading enabled")
+    else:
+        print(f"Using {num_workers} worker processes for data loading")
+    
+    dataloader_kwargs = {
+        'batch_size': args.batch_size,
+        'num_workers': num_workers,
+        'pin_memory': True and torch.cuda.is_available(),  # Only pin if GPU available
+        'persistent_workers': args.persistent_workers and num_workers > 0,
+        'shuffle': False,  # Don't shuffle for embedding generation
+        'drop_last': False,  # Keep all samples
+    }
+    
+    # Add prefetch factor for better performance
+    if num_workers > 0:
+        dataloader_kwargs['prefetch_factor'] = 4  # Same as training
+    
+    # Use spawn context for HDF5 compatibility (same as training)
+    if num_workers > 0:
+        import multiprocessing as mp
+        if platform.system() == 'Windows':
+            dataloader_kwargs['multiprocessing_context'] = mp.get_context('spawn')
+        else:
+            dataloader_kwargs['multiprocessing_context'] = mp.get_context('spawn')
+    
+    # Create data loader with error handling (same as training)
+    try:
+        loader = torch.utils.data.DataLoader(dataset, **dataloader_kwargs)
+        
+        # Test the data loader to catch issues early
+        if num_workers > 0:
+            print("Testing multiprocessing data loader...")
+            try:
+                test_batch = next(iter(loader))
+                if isinstance(test_batch, (list, tuple)):
+                    test_shape = test_batch[0].shape
+                    print(f"✓ Multiprocessing test successful: batch shape {test_shape}")
+                    print(f"   Batch format: tuple with {len(test_batch)} elements")
+                else:
+                    test_shape = test_batch.shape  
+                    print(f"✓ Multiprocessing test successful: batch shape {test_shape}")
+                    print(f"   Batch format: tensor")
+            except Exception as e:
+                print(f"   Multiprocessing test failed: {e}")
+                raise e
+            
+    except Exception as e:
+        print(f"ERROR: Multiprocessing data loading failed: {e}")
+        print("Falling back to single-threaded data loading...")
+        # Fallback to single-threaded (same as training)
+        fallback_kwargs = dataloader_kwargs.copy()
+        fallback_kwargs['num_workers'] = 0
+        fallback_kwargs.pop('multiprocessing_context', None)
+        fallback_kwargs.pop('prefetch_factor', None)
+        fallback_kwargs['persistent_workers'] = False
+        
+        loader = torch.utils.data.DataLoader(dataset, **fallback_kwargs)
+        num_workers = 0
+    
+    print(f"Final data loading config: batch_size={args.batch_size}, num_workers={num_workers}")
     
     return loader, spatial_coords, metadata
 
@@ -553,70 +612,109 @@ def main():
     if not compiled_successfully:
         print("Using standard PyTorch inference (no compilation)")
     
-    # Generate embeddings
+    # Generate embeddings (using simple approach like training)
     print("Generating embeddings...")
     latents = []
     total_samples = len(loader.dataset)
     processed_samples = 0
     start_time = time.time()
     
-    progress_bar = tqdm(loader, desc="Processing batches", unit="batch")
+    print(f"Total samples to process: {total_samples}")
+    print(f"Number of batches: {len(loader)}")
     
-    for batch_idx, batch_data in enumerate(progress_bar):
-        batch_start_time = time.time()
-        
-        # Handle different batch formats
-        if isinstance(batch_data, (list, tuple)):
-            batch = batch_data[0]
+    if args.debug:
+        print("Debug mode enabled - processing first batch only")
+        loader_iter = iter(loader)
+        test_batch = next(loader_iter)
+        print(f"First batch type: {type(test_batch)}")
+        if isinstance(test_batch, (list, tuple)):
+            print(f"Batch tuple length: {len(test_batch)}")
+            print(f"First element shape: {test_batch[0].shape}")
+            print(f"First element dtype: {test_batch[0].dtype}")
         else:
-            batch = batch_data
+            print(f"Batch tensor shape: {test_batch.shape}")
+            print(f"Batch tensor dtype: {test_batch.dtype}")
         
-        # Apply memory format optimization
-        if args.channels_last and len(batch.shape) == 4:
-            batch = batch.to(memory_format=torch.channels_last)
-        
-        # Move to device with optimized transfer
-        batch = batch.to(device, non_blocking=True)
-        
-        # Forward pass with optional mixed precision and optimizations
-        if use_amp:
-            with torch.cuda.amp.autocast():
-                with torch.inference_mode():  # More efficient than no_grad for inference
-                    z = encoder(batch)
-        else:
-            with torch.inference_mode():
+        # Reset loader
+        loader = torch.utils.data.DataLoader(loader.dataset, **{
+            k: v for k, v in loader.__dict__.items() 
+            if k in ['batch_size', 'num_workers', 'pin_memory', 'persistent_workers', 'drop_last']
+        })
+    
+    # Use tqdm with more verbose settings
+    progress_bar = tqdm(
+        loader, 
+        desc="Processing batches", 
+        unit="batch",
+        total=len(loader),
+        ncols=100,
+        mininterval=1.0  # Update every second
+    )
+    
+    try:
+        for batch_idx, batch_data in enumerate(progress_bar):
+            if args.debug and batch_idx == 0:
+                print(f"\nProcessing batch {batch_idx}")
+                print(f"  Raw batch type: {type(batch_data)}")
+            
+            batch_start_time = time.time()
+            
+            # Handle batch format exactly like training
+            if isinstance(batch_data, (list, tuple)):
+                batch = batch_data[0]  # HDF5Dataset returns tuple (x,)
+                if args.debug and batch_idx == 0:
+                    print(f"  Extracted batch shape: {batch.shape}")
+            else:
+                batch = batch_data
+                if args.debug and batch_idx == 0:
+                    print(f"  Direct batch shape: {batch.shape}")
+            
+            # Move to device (simple, like training)
+            batch = batch.to(device, non_blocking=True)
+            
+            # Forward pass (simple, like training)
+            with torch.no_grad():  # Use simple no_grad like training
                 z = encoder(batch)
-        
-        # Move back to CPU and store (with optimized memory pinning)
-        z = z.cpu()
-        latents.append(z)
-        
-        # Update progress metrics
-        processed_samples += batch.size(0)
-        batch_time = time.time() - batch_start_time
-        samples_per_sec = batch.size(0) / batch_time
-        
-        # Update progress bar with enhanced metrics
-        progress_info = {
-            "samples/sec": f"{samples_per_sec:.0f}",
-            "progress": f"{processed_samples}/{total_samples}"
-        }
-        
-        if device.type == "cuda":
-            gpu_memory_used = torch.cuda.memory_allocated(device) / 1024**3
-            gpu_memory_cached = torch.cuda.memory_reserved(device) / 1024**3
-            progress_info["GPU_mem"] = f"{gpu_memory_used:.1f}GB"
-            progress_info["GPU_cached"] = f"{gpu_memory_cached:.1f}GB"
-        
-        progress_bar.set_postfix(progress_info)
-        
-        # Aggressive memory cleanup for large datasets
-        if args.optimize_memory and (batch_idx + 1) % 5 == 0:  # More frequent cleanup
-            del batch  # Explicit cleanup
+            
+            if args.debug and batch_idx == 0:
+                print(f"  Embedding shape: {z.shape}")
+            
+            # Store result
+            z = z.cpu()
+            latents.append(z)
+            
+            # Update progress
+            processed_samples += batch.size(0)
+            batch_time = time.time() - batch_start_time
+            samples_per_sec = batch.size(0) / batch_time
+            
+            # Simple progress info
+            progress_info = {
+                "samples/sec": f"{samples_per_sec:.0f}",
+                "batch": f"{batch_idx+1}/{len(loader)}"
+            }
+            
             if device.type == "cuda":
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()  # Ensure operations complete
-            gc.collect()
+                gpu_memory_used = torch.cuda.memory_allocated(device) / 1024**3
+                progress_info["GPU"] = f"{gpu_memory_used:.1f}GB"
+            
+            progress_bar.set_postfix(progress_info)
+            
+            # Simple memory cleanup
+            if (batch_idx + 1) % 10 == 0:
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+                gc.collect()
+                
+            # Debug: process only first few batches
+            if args.debug and batch_idx >= 2:
+                print("Debug mode: stopping after 3 batches")
+                break
+                
+    except Exception as e:
+        print(f"\nError during batch processing: {e}")
+        print(f"Failed at batch {batch_idx}")
+        raise e
     
     progress_bar.close()
     
