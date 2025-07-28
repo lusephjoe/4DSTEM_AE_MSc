@@ -312,12 +312,16 @@ class LitAE(pl.LightningModule):
         loss_dict = self.model.compute_loss(x_log, x_hat_log, z)
         loss = loss_dict['total_loss']
 
+        # ADDITIONAL: Compute MSE in normalized space for comparison with reference papers
+        mse_normalized = torch.mean((x - x_hat)**2)
+
         # OPTIMIZATION: Record losses much less frequently to reduce CPU-GPU sync
         if batch_idx % 50 == 0:  # Reduced from every 10 steps
             self.train_losses.append(loss.detach().cpu().item())
 
         # Log essential metrics only
         self.log("train_loss", loss, prog_bar=True)
+        self.log("train_mse_normalized", mse_normalized, prog_bar=True)  # Reference-comparable MSE
         
         # Log main reconstruction loss (dynamically based on loss type)
         recon_loss_key = f"{self.model.loss_manager.reconstruction_loss.name}_loss"
@@ -341,11 +345,15 @@ class LitAE(pl.LightningModule):
         loss_dict = self.model.compute_loss(x_log, x_hat_log, z)
         loss = loss_dict['total_loss']
         
+        # ADDITIONAL: Compute MSE in normalized space for comparison with reference papers
+        mse_normalized = torch.mean((x - x_hat)**2)
+        
         # Calculate detailed metrics for validation (use denormalized data)
         metrics = calculate_metrics(x_log, x_hat_log)
         diffraction_metrics = calculate_diffraction_metrics(x_log, x_hat_log)
         
         self.log("val_loss", loss, prog_bar=True)
+        self.log("val_mse_normalized", mse_normalized, prog_bar=True)  # Reference-comparable MSE
         
         # Log main reconstruction loss (dynamically based on loss type)
         recon_loss_key = f"{self.model.loss_manager.reconstruction_loss.name}_loss"
