@@ -8,19 +8,27 @@ the autoencoder's latent space. UMAP preserves local neighborhood relationships 
 projecting high-dimensional latent vectors into 2D/3D space, revealing clustering 
 structure that may correspond to different domains or orientations.
 
+IMPORTANT: This script now works with pre-generated embeddings. First generate 
+embeddings using scripts/visualization/generate_embeddings.py, then use this script 
+for UMAP analysis.
+
 Usage:
+    # Step 1: Generate embeddings
+    python scripts/visualization/generate_embeddings.py \
+        --checkpoint results/ae_model.ckpt \
+        --data data/patterns.h5 \
+        --output embeddings/patterns_embeddings.npz \
+        --save_spatial_coords
+
+    # Step 2: UMAP analysis
     python scripts/analysis/umap_latent_visualization.py \
-        --checkpoint path/to/model.ckpt \
-        --data path/to/data.h5 \
+        --embeddings embeddings/patterns_embeddings.npz \
         --output_dir results/umap_analysis \
         --n_neighbors 30 \
-        --min_dist 0.1 \
-        --n_samples 10000
+        --min_dist 0.1
 """
 
 import argparse
-import torch
-import pytorch_lightning as pl
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -40,145 +48,83 @@ from sklearn.preprocessing import StandardScaler
 from scipy.spatial.distance import pdist, squareform
 from scipy.ndimage import gaussian_filter
 
-# Add project root to path
-import sys
-sys.path.append(str(Path(__file__).parent.parent.parent))
-
-# Import project modules
-from scripts.training.train import LitAE, HDF5Dataset
-from models.autoencoder import Autoencoder
-
 class LatentSpaceAnalyzer:
-    """Comprehensive latent space analysis using UMAP and clustering."""
+    """Comprehensive latent space analysis using UMAP and clustering on pre-generated embeddings."""
     
-    def __init__(self, checkpoint_path: Path, device: str = "auto"):
-        """Initialize analyzer with trained model."""
-        self.checkpoint_path = checkpoint_path
-        self.device = self._setup_device(device)
-        self.model = None
+    def __init__(self, embeddings_path: Path):
+        """Initialize analyzer with pre-generated embeddings."""
+        self.embeddings_path = embeddings_path
         self.embeddings = None
         self.spatial_coords = None
+        self.metadata = None
         
-    def _setup_device(self, device: str) -> str:
-        """Setup compute device."""
-        if device == "auto":
-            if torch.cuda.is_available():
-                return "cuda"
-            elif torch.backends.mps.is_available():
-                return "mps"
+    def load_embeddings(self) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[Dict]]:
+        """Load pre-generated embeddings from file."""
+        print(f"Loading embeddings from: {self.embeddings_path}")
+        
+        if self.embeddings_path.suffix == '.npz':
+            # NumPy format
+            data = np.load(self.embeddings_path, allow_pickle=True)
+            self.embeddings = data['embeddings']
+            self.spatial_coords = data.get('spatial_coordinates', None)
+            
+            # Load metadata if available
+            if 'metadata' in data:
+                try:
+                    metadata_str = str(data['metadata'].item())
+                    self.metadata = json.loads(metadata_str)
+                except:
+                    self.metadata = None
             else:
-                return "cpu"
-        return device
-    
-    def load_model(self) -> None:
-        """Load trained autoencoder model from checkpoint."""
-        print(f"Loading model from: {self.checkpoint_path}")
-        
-        try:
-            # Load checkpoint
-            checkpoint = torch.load(self.checkpoint_path, map_location=self.device)
+                self.metadata = None
+                
+        elif self.embeddings_path.suffix == '.h5':
+            # HDF5 format
+            with h5py.File(self.embeddings_path, 'r') as f:
+                self.embeddings = f['embeddings'][:]
+                self.spatial_coords = f.get('spatial_coordinates', None)
+                if self.spatial_coords is not None:
+                    self.spatial_coords = self.spatial_coords[:]
+                
+                # Load metadata from attributes
+                self.metadata = {}
+                for key, value in f.attrs.items():
+                    try:
+                        # Try to parse as JSON first
+                        self.metadata[key] = json.loads(value)
+                    except:
+                        # Fall back to direct value
+                        self.metadata[key] = value
+                        
+        elif self.embeddings_path.suffix == '.pt':
+            # PyTorch format (legacy)
+            import torch
+            self.embeddings = torch.load(self.embeddings_path, map_location='cpu').numpy()
             
-            # Extract model parameters from checkpoint
-            if 'hyper_parameters' in checkpoint:
-                hparams = checkpoint['hyper_parameters']
-                latent_dim = hparams.get('latent_dim', 128)
-                out_shape = (256, 256)  # Default, will be updated if needed
-            else:
-                # Fallback defaults
-                latent_dim = 128
-                out_shape = (256, 256)
-                print("Warning: Could not find hyperparameters, using defaults")
+            # Try to load spatial coordinates
+            coord_path = self.embeddings_path.with_name(self.embeddings_path.stem + '_coords.npy')
+            if coord_path.exists():
+                self.spatial_coords = np.load(coord_path)
             
-            # Create model instance
-            self.model = LitAE(
-                latent_dim=latent_dim,
-                lr=1e-3,  # Not used for inference
-                realtime_metrics=False,
-                out_shape=out_shape
-            )
-            
-            # Load state dict
-            self.model.load_state_dict(checkpoint['state_dict'])
-            self.model.eval()
-            self.model.to(self.device)
-            
-            print(f"✓ Model loaded successfully on {self.device}")
-            print(f"  Latent dimension: {latent_dim}")
-            print(f"  Output shape: {out_shape}")
-            
-        except Exception as e:
-            print(f"Error loading model: {e}")
-            raise
-    
-    def extract_embeddings(self, data_path: Path, n_samples: Optional[int] = None, 
-                          batch_size: int = 64, use_normalization: bool = True) -> Tuple[np.ndarray, np.ndarray]:
-        """Extract latent embeddings from diffraction data."""
-        print(f"Extracting embeddings from: {data_path}")
-        
-        # Load dataset
-        dataset = HDF5Dataset(data_path, use_normalization=use_normalization)
-        
-        # Set normalization parameters in model if using normalization
-        if hasattr(self.model, 'set_normalization_params') and use_normalization:
-            self.model.set_normalization_params(
-                dataset.global_log_mean, 
-                dataset.global_log_std, 
-                use_normalization
-            )
-        
-        # Determine sample indices
-        total_patterns = len(dataset)
-        if n_samples is None or n_samples >= total_patterns:
-            sample_indices = np.arange(total_patterns)
-            n_samples = total_patterns
+            # Try to load metadata
+            meta_path = self.embeddings_path.with_name(self.embeddings_path.stem + '_metadata.json') 
+            if meta_path.exists():
+                with open(meta_path, 'r') as f:
+                    self.metadata = json.load(f)
         else:
-            # Random sampling for large datasets
-            sample_indices = np.random.choice(total_patterns, n_samples, replace=False)
-            sample_indices.sort()
+            raise ValueError(f"Unsupported embedding format: {self.embeddings_path.suffix}")
         
-        print(f"Processing {n_samples} patterns from {total_patterns} total")
-        
-        # Extract embeddings in batches
-        embeddings = []
-        spatial_coords = []
-        
-        with torch.no_grad():
-            for i in tqdm(range(0, len(sample_indices), batch_size), desc="Extracting embeddings"):
-                batch_indices = sample_indices[i:i+batch_size]
-                
-                # Load batch
-                batch_data = []
-                for idx in batch_indices:
-                    data_point = dataset[idx]
-                    if isinstance(data_point, tuple):
-                        batch_data.append(data_point[0])
-                    else:
-                        batch_data.append(data_point)
-                
-                batch_tensor = torch.stack(batch_data).to(self.device)
-                
-                # Extract embeddings
-                batch_embeddings = self.model.embed(batch_tensor)
-                embeddings.append(batch_embeddings.cpu().numpy())
-                
-                # Store spatial coordinates (assuming 2D scan grid)
-                for idx in batch_indices:
-                    # Convert linear index to 2D coordinates
-                    # This assumes square scan - adjust if needed
-                    scan_size = int(np.sqrt(total_patterns))
-                    y = idx // scan_size
-                    x = idx % scan_size
-                    spatial_coords.append([x, y])
-        
-        # Concatenate results
-        self.embeddings = np.vstack(embeddings)
-        self.spatial_coords = np.array(spatial_coords)
-        
-        print(f"✓ Extracted embeddings: {self.embeddings.shape}")
+        print(f"✓ Loaded embeddings: {self.embeddings.shape}")
         print(f"  Latent dimension: {self.embeddings.shape[1]}")
         print(f"  Embedding range: [{self.embeddings.min():.3f}, {self.embeddings.max():.3f}]")
         
-        return self.embeddings, self.spatial_coords
+        if self.spatial_coords is not None:
+            print(f"  Spatial coordinates: {self.spatial_coords.shape}")
+        
+        if self.metadata is not None:
+            print(f"  Metadata keys: {list(self.metadata.keys())}")
+        
+        return self.embeddings, self.spatial_coords, self.metadata
     
     def compute_umap_embedding(self, n_neighbors: int = 15, min_dist: float = 0.1, 
                              n_components: int = 2, metric: str = 'euclidean',
@@ -541,11 +487,9 @@ class LatentSpaceAnalyzer:
 def main():
     parser = argparse.ArgumentParser(description="UMAP Latent Space Visualization for 4D-STEM Autoencoder")
     
-    # Required arguments
-    parser.add_argument("--checkpoint", type=Path, required=True,
-                       help="Path to trained autoencoder checkpoint (.ckpt)")
-    parser.add_argument("--data", type=Path, required=True,
-                       help="Path to HDF5 data file (.h5)")
+    # Required arguments - now uses pre-generated embeddings
+    parser.add_argument("--embeddings", type=Path, required=True,
+                       help="Path to pre-generated embeddings (.npz, .h5, .pt)")
     parser.add_argument("--output_dir", type=Path, default="umap_analysis",
                        help="Output directory for results and plots")
     
@@ -568,50 +512,51 @@ def main():
     parser.add_argument("--n_clusters", type=int, default=5,
                        help="Number of clusters for K-means")
     
-    # Data parameters
-    parser.add_argument("--n_samples", type=int, default=None,
-                       help="Number of samples to analyze (None = all)")
-    parser.add_argument("--batch_size", type=int, default=64,
-                       help="Batch size for embedding extraction")
-    parser.add_argument("--no_normalization", action="store_true",
-                       help="Disable data normalization")
-    
-    # Other parameters
-    parser.add_argument("--device", type=str, default="auto",
-                       choices=["auto", "cpu", "cuda", "mps"],
-                       help="Compute device")
+    # Analysis parameters
+    parser.add_argument("--subsample", type=int, default=None,
+                       help="Randomly subsample N embeddings for faster analysis")
+    parser.add_argument("--standardize", action="store_true",
+                       help="Standardize embeddings before UMAP")
     parser.add_argument("--random_state", type=int, default=42,
                        help="Random seed for reproducibility")
     
     args = parser.parse_args()
     
     # Validate inputs
-    if not args.checkpoint.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
-    if not args.data.exists():
-        raise FileNotFoundError(f"Data file not found: {args.data}")
+    if not args.embeddings.exists():
+        raise FileNotFoundError(f"Embeddings not found: {args.embeddings}")
     
     print("="*80)
     print("UMAP LATENT SPACE ANALYSIS")
     print("="*80)
-    print(f"Checkpoint: {args.checkpoint}")
-    print(f"Data: {args.data}")
+    print(f"Embeddings: {args.embeddings}")
     print(f"Output: {args.output_dir}")
     print(f"UMAP parameters: n_neighbors={args.n_neighbors}, min_dist={args.min_dist}")
     print(f"Clustering: {args.clustering}")
     print("="*80)
     
     # Initialize analyzer
-    analyzer = LatentSpaceAnalyzer(args.checkpoint, args.device)
+    analyzer = LatentSpaceAnalyzer(args.embeddings)
     
-    # Load model
-    analyzer.load_model()
+    # Load embeddings
+    embeddings, spatial_coords, metadata = analyzer.load_embeddings()
     
-    # Extract embeddings
-    use_normalization = not args.no_normalization
-    embeddings, spatial_coords = analyzer.extract_embeddings(
-        args.data, args.n_samples, args.batch_size, use_normalization
-    )
+    # Optional subsampling for large datasets
+    if args.subsample and args.subsample < len(embeddings):
+        print(f"Subsampling {args.subsample} embeddings from {len(embeddings)} total...")
+        indices = np.random.choice(len(embeddings), args.subsample, replace=False)
+        embeddings = embeddings[indices]
+        if spatial_coords is not None:
+            spatial_coords = spatial_coords[indices]
+        analyzer.embeddings = embeddings
+        analyzer.spatial_coords = spatial_coords
+    
+    # Optional standardization
+    if args.standardize:
+        print("Standardizing embeddings...")
+        scaler = StandardScaler()
+        embeddings = scaler.fit_transform(embeddings)
+        analyzer.embeddings = embeddings
     
     # Compute UMAP embedding
     umap_embedding, umap_reducer = analyzer.compute_umap_embedding(
@@ -640,11 +585,9 @@ def main():
     analyzer.create_visualizations(umap_embedding, cluster_labels, args.output_dir)
     
     # Save results
-    metadata = {
-        'checkpoint_path': str(args.checkpoint),
-        'data_path': str(args.data),
-        'n_samples': args.n_samples or len(embeddings),
-        'total_patterns': len(embeddings),
+    result_metadata = {
+        'embeddings_path': str(args.embeddings),
+        'n_patterns': len(embeddings),
         'latent_dimension': embeddings.shape[1],
         'umap_parameters': {
             'n_neighbors': args.n_neighbors,
@@ -653,11 +596,12 @@ def main():
             'metric': args.metric
         },
         'clustering_method': args.clustering,
-        'use_normalization': use_normalization,
-        'device': args.device
+        'standardized': args.standardize,
+        'subsampled': args.subsample,
+        'original_metadata': metadata
     }
     
-    analyzer.save_results(umap_embedding, cluster_labels, args.output_dir, metadata)
+    analyzer.save_results(umap_embedding, cluster_labels, args.output_dir, result_metadata)
     
     print("\n" + "="*80)
     print("ANALYSIS COMPLETED SUCCESSFULLY")
