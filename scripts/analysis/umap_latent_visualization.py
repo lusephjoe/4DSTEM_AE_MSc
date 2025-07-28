@@ -1,0 +1,682 @@
+#!/usr/bin/env python3
+"""
+UMAP Latent Space Visualization for 4D-STEM Autoencoder Analysis
+
+This script performs comprehensive latent space analysis using UMAP (Uniform Manifold 
+Approximation and Projection) to visualize how diffraction patterns are organized in 
+the autoencoder's latent space. UMAP preserves local neighborhood relationships while 
+projecting high-dimensional latent vectors into 2D/3D space, revealing clustering 
+structure that may correspond to different domains or orientations.
+
+Usage:
+    python scripts/analysis/umap_latent_visualization.py \
+        --checkpoint path/to/model.ckpt \
+        --data path/to/data.h5 \
+        --output_dir results/umap_analysis \
+        --n_neighbors 30 \
+        --min_dist 0.1 \
+        --n_samples 10000
+"""
+
+import argparse
+import torch
+import pytorch_lightning as pl
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
+import h5py
+import json
+from typing import Tuple, Optional, Dict, List
+from tqdm import tqdm
+import warnings
+warnings.filterwarnings("ignore")
+
+# Scientific computing
+import umap
+from sklearn.cluster import HDBSCAN, KMeans
+from sklearn.metrics import silhouette_score
+from sklearn.preprocessing import StandardScaler
+from scipy.spatial.distance import pdist, squareform
+from scipy.ndimage import gaussian_filter
+
+# Add project root to path
+import sys
+sys.path.append(str(Path(__file__).parent.parent.parent))
+
+# Import project modules
+from scripts.training.train import LitAE, HDF5Dataset
+from models.autoencoder import Autoencoder
+
+class LatentSpaceAnalyzer:
+    """Comprehensive latent space analysis using UMAP and clustering."""
+    
+    def __init__(self, checkpoint_path: Path, device: str = "auto"):
+        """Initialize analyzer with trained model."""
+        self.checkpoint_path = checkpoint_path
+        self.device = self._setup_device(device)
+        self.model = None
+        self.embeddings = None
+        self.spatial_coords = None
+        
+    def _setup_device(self, device: str) -> str:
+        """Setup compute device."""
+        if device == "auto":
+            if torch.cuda.is_available():
+                return "cuda"
+            elif torch.backends.mps.is_available():
+                return "mps"
+            else:
+                return "cpu"
+        return device
+    
+    def load_model(self) -> None:
+        """Load trained autoencoder model from checkpoint."""
+        print(f"Loading model from: {self.checkpoint_path}")
+        
+        try:
+            # Load checkpoint
+            checkpoint = torch.load(self.checkpoint_path, map_location=self.device)
+            
+            # Extract model parameters from checkpoint
+            if 'hyper_parameters' in checkpoint:
+                hparams = checkpoint['hyper_parameters']
+                latent_dim = hparams.get('latent_dim', 128)
+                out_shape = (256, 256)  # Default, will be updated if needed
+            else:
+                # Fallback defaults
+                latent_dim = 128
+                out_shape = (256, 256)
+                print("Warning: Could not find hyperparameters, using defaults")
+            
+            # Create model instance
+            self.model = LitAE(
+                latent_dim=latent_dim,
+                lr=1e-3,  # Not used for inference
+                realtime_metrics=False,
+                out_shape=out_shape
+            )
+            
+            # Load state dict
+            self.model.load_state_dict(checkpoint['state_dict'])
+            self.model.eval()
+            self.model.to(self.device)
+            
+            print(f"✓ Model loaded successfully on {self.device}")
+            print(f"  Latent dimension: {latent_dim}")
+            print(f"  Output shape: {out_shape}")
+            
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            raise
+    
+    def extract_embeddings(self, data_path: Path, n_samples: Optional[int] = None, 
+                          batch_size: int = 64, use_normalization: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+        """Extract latent embeddings from diffraction data."""
+        print(f"Extracting embeddings from: {data_path}")
+        
+        # Load dataset
+        dataset = HDF5Dataset(data_path, use_normalization=use_normalization)
+        
+        # Set normalization parameters in model if using normalization
+        if hasattr(self.model, 'set_normalization_params') and use_normalization:
+            self.model.set_normalization_params(
+                dataset.global_log_mean, 
+                dataset.global_log_std, 
+                use_normalization
+            )
+        
+        # Determine sample indices
+        total_patterns = len(dataset)
+        if n_samples is None or n_samples >= total_patterns:
+            sample_indices = np.arange(total_patterns)
+            n_samples = total_patterns
+        else:
+            # Random sampling for large datasets
+            sample_indices = np.random.choice(total_patterns, n_samples, replace=False)
+            sample_indices.sort()
+        
+        print(f"Processing {n_samples} patterns from {total_patterns} total")
+        
+        # Extract embeddings in batches
+        embeddings = []
+        spatial_coords = []
+        
+        with torch.no_grad():
+            for i in tqdm(range(0, len(sample_indices), batch_size), desc="Extracting embeddings"):
+                batch_indices = sample_indices[i:i+batch_size]
+                
+                # Load batch
+                batch_data = []
+                for idx in batch_indices:
+                    data_point = dataset[idx]
+                    if isinstance(data_point, tuple):
+                        batch_data.append(data_point[0])
+                    else:
+                        batch_data.append(data_point)
+                
+                batch_tensor = torch.stack(batch_data).to(self.device)
+                
+                # Extract embeddings
+                batch_embeddings = self.model.embed(batch_tensor)
+                embeddings.append(batch_embeddings.cpu().numpy())
+                
+                # Store spatial coordinates (assuming 2D scan grid)
+                for idx in batch_indices:
+                    # Convert linear index to 2D coordinates
+                    # This assumes square scan - adjust if needed
+                    scan_size = int(np.sqrt(total_patterns))
+                    y = idx // scan_size
+                    x = idx % scan_size
+                    spatial_coords.append([x, y])
+        
+        # Concatenate results
+        self.embeddings = np.vstack(embeddings)
+        self.spatial_coords = np.array(spatial_coords)
+        
+        print(f"✓ Extracted embeddings: {self.embeddings.shape}")
+        print(f"  Latent dimension: {self.embeddings.shape[1]}")
+        print(f"  Embedding range: [{self.embeddings.min():.3f}, {self.embeddings.max():.3f}]")
+        
+        return self.embeddings, self.spatial_coords
+    
+    def compute_umap_embedding(self, n_neighbors: int = 15, min_dist: float = 0.1, 
+                             n_components: int = 2, metric: str = 'euclidean',
+                             random_state: int = 42) -> np.ndarray:
+        """Compute UMAP embedding of latent space."""
+        print(f"Computing UMAP embedding...")
+        print(f"  n_neighbors: {n_neighbors}")
+        print(f"  min_dist: {min_dist}")
+        print(f"  n_components: {n_components}")
+        print(f"  metric: {metric}")
+        
+        # Initialize UMAP
+        reducer = umap.UMAP(
+            n_neighbors=n_neighbors,
+            min_dist=min_dist,
+            n_components=n_components,
+            metric=metric,
+            random_state=random_state,
+            verbose=True
+        )
+        
+        # Fit and transform
+        umap_embedding = reducer.fit_transform(self.embeddings)
+        
+        print(f"✓ UMAP embedding computed: {umap_embedding.shape}")
+        print(f"  UMAP range: X=[{umap_embedding[:, 0].min():.2f}, {umap_embedding[:, 0].max():.2f}]")
+        print(f"               Y=[{umap_embedding[:, 1].min():.2f}, {umap_embedding[:, 1].max():.2f}]")
+        
+        return umap_embedding, reducer
+    
+    def perform_clustering(self, umap_embedding: np.ndarray, 
+                          method: str = 'hdbscan', **kwargs) -> np.ndarray:
+        """Perform clustering on UMAP embedding."""
+        print(f"Performing clustering using {method}...")
+        
+        if method.lower() == 'hdbscan':
+            min_cluster_size = kwargs.get('min_cluster_size', 50)
+            min_samples = kwargs.get('min_samples', 5)
+            
+            clusterer = HDBSCAN(
+                min_cluster_size=min_cluster_size,
+                min_samples=min_samples,
+                cluster_selection_epsilon=kwargs.get('cluster_selection_epsilon', 0.0)
+            )
+            cluster_labels = clusterer.fit_predict(umap_embedding)
+            
+        elif method.lower() == 'kmeans':
+            n_clusters = kwargs.get('n_clusters', 5)
+            clusterer = KMeans(n_clusters=n_clusters, random_state=42)
+            cluster_labels = clusterer.fit_predict(umap_embedding)
+            
+        else:
+            raise ValueError(f"Unsupported clustering method: {method}")
+        
+        n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
+        n_noise = list(cluster_labels).count(-1)
+        
+        print(f"✓ Clustering completed:")
+        print(f"  Number of clusters: {n_clusters}")
+        print(f"  Number of noise points: {n_noise}")
+        print(f"  Silhouette score: {silhouette_score(umap_embedding, cluster_labels):.3f}")
+        
+        return cluster_labels
+    
+    def create_visualizations(self, umap_embedding: np.ndarray, 
+                            cluster_labels: Optional[np.ndarray] = None,
+                            output_dir: Path = Path("umap_analysis")) -> None:
+        """Create comprehensive UMAP visualizations."""
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Set up plotting style
+        plt.style.use('default')
+        sns.set_palette("husl")
+        
+        # 1. Basic UMAP scatter plot
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+        fig.suptitle('UMAP Latent Space Analysis', fontsize=16, fontweight='bold')
+        
+        # Plot 1: Basic UMAP embedding
+        ax = axes[0, 0]
+        scatter = ax.scatter(umap_embedding[:, 0], umap_embedding[:, 1], 
+                           c='steelblue', s=1, alpha=0.6)
+        ax.set_title('UMAP Embedding of Latent Space')
+        ax.set_xlabel('UMAP 1')
+        ax.set_ylabel('UMAP 2')
+        ax.grid(True, alpha=0.3)
+        
+        # Plot 2: Density plot
+        ax = axes[0, 1]
+        try:
+            # Create density plot using hexbin
+            hb = ax.hexbin(umap_embedding[:, 0], umap_embedding[:, 1], 
+                          gridsize=50, cmap='Blues', mincnt=1)
+            ax.set_title('UMAP Density Distribution')
+            ax.set_xlabel('UMAP 1')
+            ax.set_ylabel('UMAP 2')
+            plt.colorbar(hb, ax=ax, label='Point Density')
+        except:
+            # Fallback to regular scatter if hexbin fails
+            ax.scatter(umap_embedding[:, 0], umap_embedding[:, 1], 
+                      c='steelblue', s=1, alpha=0.6)
+            ax.set_title('UMAP Embedding (Density Fallback)')
+        
+        # Plot 3: Clustering results
+        ax = axes[1, 0]
+        if cluster_labels is not None:
+            unique_labels = np.unique(cluster_labels)
+            colors = plt.cm.Set1(np.linspace(0, 1, len(unique_labels)))
+            
+            for label, color in zip(unique_labels, colors):
+                mask = cluster_labels == label
+                if label == -1:
+                    # Noise points in gray
+                    ax.scatter(umap_embedding[mask, 0], umap_embedding[mask, 1], 
+                             c='gray', s=1, alpha=0.3, label='Noise')
+                else:
+                    ax.scatter(umap_embedding[mask, 0], umap_embedding[mask, 1], 
+                             c=[color], s=2, alpha=0.7, label=f'Cluster {label}')
+            
+            ax.set_title('UMAP with Clustering')
+            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+        else:
+            ax.scatter(umap_embedding[:, 0], umap_embedding[:, 1], 
+                      c='steelblue', s=1, alpha=0.6)
+            ax.set_title('UMAP Embedding (No Clustering)')
+        
+        ax.set_xlabel('UMAP 1')
+        ax.set_ylabel('UMAP 2')
+        ax.grid(True, alpha=0.3)
+        
+        # Plot 4: Spatial mapping (if spatial coordinates available)
+        ax = axes[1, 1]
+        if self.spatial_coords is not None and cluster_labels is not None:
+            # Create spatial map colored by cluster
+            scatter = ax.scatter(self.spatial_coords[:, 0], self.spatial_coords[:, 1], 
+                               c=cluster_labels, cmap='Set1', s=4, alpha=0.8)
+            ax.set_title('Spatial Distribution of Clusters')
+            ax.set_xlabel('Scan X Position')
+            ax.set_ylabel('Scan Y Position')
+            plt.colorbar(scatter, ax=ax, label='Cluster ID')
+        else:
+            # Fallback: show spatial coordinates colored by UMAP position
+            if self.spatial_coords is not None:
+                scatter = ax.scatter(self.spatial_coords[:, 0], self.spatial_coords[:, 1], 
+                                   c=umap_embedding[:, 0], cmap='viridis', s=4, alpha=0.8)
+                ax.set_title('Spatial Coordinates (UMAP 1 color)')
+                ax.set_xlabel('Scan X Position')
+                ax.set_ylabel('Scan Y Position')
+                plt.colorbar(scatter, ax=ax, label='UMAP 1')
+            else:
+                ax.text(0.5, 0.5, 'No spatial coordinates\navailable', 
+                       ha='center', va='center', transform=ax.transAxes)
+                ax.set_title('Spatial Information N/A')
+        
+        plt.tight_layout()
+        plt.savefig(output_dir / 'umap_overview.png', dpi=300, bbox_inches='tight')
+        plt.savefig(output_dir / 'umap_overview.pdf', bbox_inches='tight')
+        plt.close()
+        
+        # 2. Detailed cluster analysis plots
+        if cluster_labels is not None:
+            self._create_cluster_analysis_plots(umap_embedding, cluster_labels, output_dir)
+        
+        # 3. Parameter sensitivity analysis
+        self._create_parameter_analysis(output_dir)
+        
+        print(f"✓ Visualizations saved to: {output_dir}")
+    
+    def _create_cluster_analysis_plots(self, umap_embedding: np.ndarray, 
+                                     cluster_labels: np.ndarray, output_dir: Path) -> None:
+        """Create detailed cluster analysis visualizations."""
+        
+        # Cluster statistics
+        unique_labels = np.unique(cluster_labels)
+        n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
+        
+        if n_clusters > 1:
+            fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+            fig.suptitle('Detailed Cluster Analysis', fontsize=16, fontweight='bold')
+            
+            # Plot cluster sizes
+            ax = axes[0, 0]
+            cluster_sizes = [np.sum(cluster_labels == label) for label in unique_labels if label != -1]
+            cluster_names = [f'Cluster {label}' for label in unique_labels if label != -1]
+            
+            bars = ax.bar(cluster_names, cluster_sizes, alpha=0.7)
+            ax.set_title('Cluster Sizes')
+            ax.set_ylabel('Number of Points')
+            ax.tick_params(axis='x', rotation=45)
+            
+            # Add value labels on bars
+            for bar, size in zip(bars, cluster_sizes):
+                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(cluster_sizes)*0.01,
+                       str(size), ha='center', va='bottom')
+            
+            # Plot cluster separation (silhouette analysis)
+            ax = axes[0, 1]
+            if len(unique_labels) > 1:
+                from sklearn.metrics import silhouette_samples
+                silhouette_avg = silhouette_score(umap_embedding, cluster_labels)
+                sample_silhouette_values = silhouette_samples(umap_embedding, cluster_labels)
+                
+                y_lower = 10
+                for i, label in enumerate(unique_labels):
+                    if label == -1:
+                        continue
+                    
+                    cluster_silhouette_values = sample_silhouette_values[cluster_labels == label]
+                    cluster_silhouette_values.sort()
+                    
+                    size_cluster_i = cluster_silhouette_values.shape[0]
+                    y_upper = y_lower + size_cluster_i
+                    
+                    color = plt.cm.Set1(i / len(unique_labels))
+                    ax.fill_betweenx(np.arange(y_lower, y_upper),
+                                    0, cluster_silhouette_values,
+                                    facecolor=color, edgecolor=color, alpha=0.7)
+                    
+                    ax.text(-0.05, y_lower + 0.5 * size_cluster_i, str(label))
+                    y_lower = y_upper + 10
+                
+                ax.axvline(x=silhouette_avg, color="red", linestyle="--", 
+                          label=f'Average Score: {silhouette_avg:.3f}')
+                ax.set_title('Silhouette Analysis')
+                ax.set_xlabel('Silhouette Coefficient Values')
+                ax.set_ylabel('Cluster Label')
+                ax.legend()
+            
+            # Plot cluster centers and boundaries
+            ax = axes[1, 0]
+            for label in unique_labels:
+                if label == -1:
+                    continue
+                mask = cluster_labels == label
+                cluster_points = umap_embedding[mask]
+                
+                # Plot cluster points
+                ax.scatter(cluster_points[:, 0], cluster_points[:, 1], 
+                          alpha=0.6, s=2, label=f'Cluster {label}')
+                
+                # Plot cluster center
+                center = np.mean(cluster_points, axis=0)
+                ax.scatter(center[0], center[1], marker='x', s=100, 
+                          color='black', linewidth=3)
+            
+            ax.set_title('Cluster Centers and Boundaries')
+            ax.set_xlabel('UMAP 1')
+            ax.set_ylabel('UMAP 2')
+            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+            ax.grid(True, alpha=0.3)
+            
+            # Plot distance matrix between clusters
+            ax = axes[1, 1]
+            if n_clusters > 1:
+                # Compute cluster centers
+                centers = []
+                valid_labels = []
+                for label in unique_labels:
+                    if label != -1:
+                        mask = cluster_labels == label
+                        center = np.mean(umap_embedding[mask], axis=0)
+                        centers.append(center)
+                        valid_labels.append(label)
+                
+                centers = np.array(centers)
+                distances = squareform(pdist(centers))
+                
+                im = ax.imshow(distances, cmap='viridis')
+                ax.set_title('Inter-cluster Distances')
+                ax.set_xticks(range(len(valid_labels)))
+                ax.set_yticks(range(len(valid_labels)))
+                ax.set_xticklabels([f'C{label}' for label in valid_labels])
+                ax.set_yticklabels([f'C{label}' for label in valid_labels])
+                plt.colorbar(im, ax=ax, label='Distance')
+                
+                # Add distance values to cells
+                for i in range(len(valid_labels)):
+                    for j in range(len(valid_labels)):
+                        ax.text(j, i, f'{distances[i, j]:.2f}', 
+                               ha='center', va='center', color='white' if distances[i, j] > distances.max()/2 else 'black')
+            
+            plt.tight_layout()
+            plt.savefig(output_dir / 'cluster_analysis.png', dpi=300, bbox_inches='tight')
+            plt.close()
+    
+    def _create_parameter_analysis(self, output_dir: Path) -> None:
+        """Create parameter sensitivity analysis (if embeddings available)."""
+        if self.embeddings is None:
+            return
+        
+        print("Creating parameter sensitivity analysis...")
+        
+        # Test different UMAP parameters
+        n_neighbors_list = [5, 15, 30, 50]
+        min_dist_list = [0.01, 0.1, 0.5, 1.0]
+        
+        fig, axes = plt.subplots(len(n_neighbors_list), len(min_dist_list), 
+                               figsize=(16, 12))
+        fig.suptitle('UMAP Parameter Sensitivity Analysis', fontsize=16, fontweight='bold')
+        
+        for i, n_neighbors in enumerate(n_neighbors_list):
+            for j, min_dist in enumerate(min_dist_list):
+                ax = axes[i, j]
+                
+                # Compute UMAP with current parameters
+                reducer = umap.UMAP(
+                    n_neighbors=n_neighbors,
+                    min_dist=min_dist,
+                    n_components=2,
+                    random_state=42,
+                    verbose=False
+                )
+                
+                # Sample data if too large (for speed)
+                if len(self.embeddings) > 5000:
+                    indices = np.random.choice(len(self.embeddings), 5000, replace=False)
+                    sample_embeddings = self.embeddings[indices]
+                else:
+                    sample_embeddings = self.embeddings
+                
+                embedding = reducer.fit_transform(sample_embeddings)
+                
+                ax.scatter(embedding[:, 0], embedding[:, 1], s=1, alpha=0.6)
+                ax.set_title(f'n_neighbors={n_neighbors}\nmin_dist={min_dist}', fontsize=10)
+                ax.set_xticks([])
+                ax.set_yticks([])
+        
+        plt.tight_layout()
+        plt.savefig(output_dir / 'parameter_sensitivity.png', dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def save_results(self, umap_embedding: np.ndarray, cluster_labels: Optional[np.ndarray],
+                    output_dir: Path, metadata: Dict) -> None:
+        """Save analysis results to files."""
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save embeddings and results
+        results = {
+            'original_embeddings': self.embeddings.tolist(),
+            'umap_embedding': umap_embedding.tolist(),
+            'spatial_coordinates': self.spatial_coords.tolist() if self.spatial_coords is not None else None,
+            'cluster_labels': cluster_labels.tolist() if cluster_labels is not None else None,
+            'metadata': metadata
+        }
+        
+        with open(output_dir / 'umap_results.json', 'w') as f:
+            json.dump(results, f, indent=2)
+        
+        # Save as numpy arrays for easy loading
+        np.savez(output_dir / 'umap_data.npz',
+                original_embeddings=self.embeddings,
+                umap_embedding=umap_embedding,
+                spatial_coordinates=self.spatial_coords,
+                cluster_labels=cluster_labels)
+        
+        print(f"✓ Results saved to: {output_dir}")
+
+def main():
+    parser = argparse.ArgumentParser(description="UMAP Latent Space Visualization for 4D-STEM Autoencoder")
+    
+    # Required arguments
+    parser.add_argument("--checkpoint", type=Path, required=True,
+                       help="Path to trained autoencoder checkpoint (.ckpt)")
+    parser.add_argument("--data", type=Path, required=True,
+                       help="Path to HDF5 data file (.h5)")
+    parser.add_argument("--output_dir", type=Path, default="umap_analysis",
+                       help="Output directory for results and plots")
+    
+    # UMAP parameters
+    parser.add_argument("--n_neighbors", type=int, default=30,
+                       help="UMAP n_neighbors parameter (15-50 recommended)")
+    parser.add_argument("--min_dist", type=float, default=0.1,
+                       help="UMAP min_dist parameter (0.01-0.5 recommended)")
+    parser.add_argument("--n_components", type=int, default=2,
+                       help="Number of UMAP dimensions (2 or 3)")
+    parser.add_argument("--metric", type=str, default="euclidean",
+                       help="Distance metric for UMAP")
+    
+    # Clustering parameters
+    parser.add_argument("--clustering", type=str, default="hdbscan",
+                       choices=["hdbscan", "kmeans", "none"],
+                       help="Clustering method to apply")
+    parser.add_argument("--min_cluster_size", type=int, default=50,
+                       help="Minimum cluster size for HDBSCAN")
+    parser.add_argument("--n_clusters", type=int, default=5,
+                       help="Number of clusters for K-means")
+    
+    # Data parameters
+    parser.add_argument("--n_samples", type=int, default=None,
+                       help="Number of samples to analyze (None = all)")
+    parser.add_argument("--batch_size", type=int, default=64,
+                       help="Batch size for embedding extraction")
+    parser.add_argument("--no_normalization", action="store_true",
+                       help="Disable data normalization")
+    
+    # Other parameters
+    parser.add_argument("--device", type=str, default="auto",
+                       choices=["auto", "cpu", "cuda", "mps"],
+                       help="Compute device")
+    parser.add_argument("--random_state", type=int, default=42,
+                       help="Random seed for reproducibility")
+    
+    args = parser.parse_args()
+    
+    # Validate inputs
+    if not args.checkpoint.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
+    if not args.data.exists():
+        raise FileNotFoundError(f"Data file not found: {args.data}")
+    
+    print("="*80)
+    print("UMAP LATENT SPACE ANALYSIS")
+    print("="*80)
+    print(f"Checkpoint: {args.checkpoint}")
+    print(f"Data: {args.data}")
+    print(f"Output: {args.output_dir}")
+    print(f"UMAP parameters: n_neighbors={args.n_neighbors}, min_dist={args.min_dist}")
+    print(f"Clustering: {args.clustering}")
+    print("="*80)
+    
+    # Initialize analyzer
+    analyzer = LatentSpaceAnalyzer(args.checkpoint, args.device)
+    
+    # Load model
+    analyzer.load_model()
+    
+    # Extract embeddings
+    use_normalization = not args.no_normalization
+    embeddings, spatial_coords = analyzer.extract_embeddings(
+        args.data, args.n_samples, args.batch_size, use_normalization
+    )
+    
+    # Compute UMAP embedding
+    umap_embedding, umap_reducer = analyzer.compute_umap_embedding(
+        n_neighbors=args.n_neighbors,
+        min_dist=args.min_dist,
+        n_components=args.n_components,
+        metric=args.metric,
+        random_state=args.random_state
+    )
+    
+    # Perform clustering
+    cluster_labels = None
+    if args.clustering != "none":
+        if args.clustering == "hdbscan":
+            cluster_labels = analyzer.perform_clustering(
+                umap_embedding, "hdbscan",
+                min_cluster_size=args.min_cluster_size
+            )
+        elif args.clustering == "kmeans":
+            cluster_labels = analyzer.perform_clustering(
+                umap_embedding, "kmeans",
+                n_clusters=args.n_clusters
+            )
+    
+    # Create visualizations
+    analyzer.create_visualizations(umap_embedding, cluster_labels, args.output_dir)
+    
+    # Save results
+    metadata = {
+        'checkpoint_path': str(args.checkpoint),
+        'data_path': str(args.data),
+        'n_samples': args.n_samples or len(embeddings),
+        'total_patterns': len(embeddings),
+        'latent_dimension': embeddings.shape[1],
+        'umap_parameters': {
+            'n_neighbors': args.n_neighbors,
+            'min_dist': args.min_dist,
+            'n_components': args.n_components,
+            'metric': args.metric
+        },
+        'clustering_method': args.clustering,
+        'use_normalization': use_normalization,
+        'device': args.device
+    }
+    
+    analyzer.save_results(umap_embedding, cluster_labels, args.output_dir, metadata)
+    
+    print("\n" + "="*80)
+    print("ANALYSIS COMPLETED SUCCESSFULLY")
+    print("="*80)
+    print(f"Results saved to: {args.output_dir}")
+    
+    if cluster_labels is not None:
+        n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
+        n_noise = list(cluster_labels).count(-1)
+        print(f"Clusters found: {n_clusters}")
+        print(f"Noise points: {n_noise}")
+    
+    print("\nGenerated files:")
+    print("  - umap_overview.png/pdf: Main visualization")
+    print("  - cluster_analysis.png: Detailed cluster analysis") 
+    print("  - parameter_sensitivity.png: Parameter comparison")
+    print("  - umap_results.json: Full results")
+    print("  - umap_data.npz: Numpy data arrays")
+    print("="*80)
+
+if __name__ == "__main__":
+    main()
