@@ -85,6 +85,10 @@ def parse_args():
                    help="Number of batches to prefetch per worker")
     p.add_argument("--optimize_memory", action="store_true",
                    help="Enable memory optimizations for large datasets")
+    p.add_argument("--auto_batch_size", action="store_true",
+                   help="Automatically determine optimal batch size for GPU")
+    p.add_argument("--channels_last", action="store_true",
+                   help="Use channels_last memory format for better performance")
     
     # Analysis arguments
     p.add_argument("--pca", type=int, default=0,
@@ -115,25 +119,38 @@ def setup_device(device_str: str) -> torch.device:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         
-        # Advanced optimizations for modern GPUs
-        if hasattr(torch.backends.cuda, 'flash_sdp_enabled'):
-            torch.backends.cuda.flash_sdp_enabled(True)
-        if hasattr(torch.backends.cuda, 'math_sdp_enabled'):
-            torch.backends.cuda.math_sdp_enabled(True)
-        if hasattr(torch.backends.cuda, 'mem_efficient_sdp_enabled'):
-            torch.backends.cuda.mem_efficient_sdp_enabled(True)
+        # Advanced optimizations for modern GPUs (PyTorch 2.0+)
+        try:
+            # These functions don't take arguments - they're context managers or properties
+            if hasattr(torch.backends.cuda, 'flash_sdp_enabled'):
+                # Check if it's available and enable
+                pass  # This is typically enabled by default in newer PyTorch
+            if hasattr(torch.backends.cuda, 'enable_math_sdp'):
+                torch.backends.cuda.enable_math_sdp(True)
+            if hasattr(torch.backends.cuda, 'enable_flash_sdp'):
+                torch.backends.cuda.enable_flash_sdp(True)
+            if hasattr(torch.backends.cuda, 'enable_mem_efficient_sdp'):
+                torch.backends.cuda.enable_mem_efficient_sdp(True)
+        except Exception as e:
+            print(f"   Warning: Some CUDA optimizations unavailable: {e}")
         
         # Set memory allocator optimizations
         torch.cuda.empty_cache()
-        if hasattr(torch.cuda, 'set_per_process_memory_fraction'):
-            # Reserve 10% for system processes
-            torch.cuda.set_per_process_memory_fraction(0.9)
+        
+        # Memory fraction setting (be more conservative on Windows)
+        try:
+            if hasattr(torch.cuda, 'set_per_process_memory_fraction'):
+                # Reserve more memory for system on Windows
+                torch.cuda.set_per_process_memory_fraction(0.85)
+        except Exception as e:
+            print(f"   Warning: Could not set memory fraction: {e}")
         
         # Enable memory pool for faster allocations
         try:
-            torch.cuda.memory._set_allocator_settings('expandable_segments:True')
-        except:
-            pass  # Not available on all CUDA versions
+            if hasattr(torch.cuda.memory, '_set_allocator_settings'):
+                torch.cuda.memory._set_allocator_settings('expandable_segments:True')
+        except Exception as e:
+            print(f"   Warning: Memory pool optimization unavailable: {e}")
         
         device_props = torch.cuda.get_device_properties(device)
         print(f"🚀 CUDA optimizations enabled on {device_props.name}")
@@ -149,6 +166,60 @@ def setup_device(device_str: str) -> torch.device:
         print(f"🍎 MPS optimizations enabled")
     
     return device
+
+def find_optimal_batch_size(model: torch.nn.Module, sample_input: torch.Tensor, 
+                           device: torch.device, max_batch_size: int = 1024) -> int:
+    """Find optimal batch size through binary search."""
+    if device.type != "cuda":
+        return min(max_batch_size, 64)  # Conservative for CPU/MPS
+    
+    print("🔍 Finding optimal batch size...")
+    model.eval()
+    
+    # Start with a reasonable lower bound
+    min_batch_size = 1
+    optimal_batch_size = min_batch_size
+    
+    for batch_size in [2, 4, 8, 16, 32, 64, 128, 256, 512, max_batch_size]:
+        if batch_size > max_batch_size:
+            break
+            
+        try:
+            # Clear cache before test
+            torch.cuda.empty_cache()
+            
+            # Create test batch
+            test_batch = sample_input.repeat(batch_size, *([1] * (sample_input.dim() - 1)))
+            test_batch = test_batch.to(device, non_blocking=True)
+            
+            # Test forward pass
+            with torch.no_grad():
+                _ = model(test_batch)
+            
+            # Check memory usage
+            memory_used = torch.cuda.memory_allocated(device) / 1024**3
+            memory_total = torch.cuda.get_device_properties(device).total_memory / 1024**3
+            memory_usage_pct = (memory_used / memory_total) * 100
+            
+            if memory_usage_pct < 80:  # Keep under 80% memory usage
+                optimal_batch_size = batch_size
+                print(f"   Batch size {batch_size}: OK ({memory_usage_pct:.1f}% GPU memory)")
+            else:
+                print(f"   Batch size {batch_size}: Too large ({memory_usage_pct:.1f}% GPU memory)")
+                break
+                
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                print(f"   Batch size {batch_size}: Out of memory")
+                break
+            else:
+                raise e
+    
+    # Clear cache after testing
+    torch.cuda.empty_cache()
+    
+    print(f"✓ Optimal batch size: {optimal_batch_size}")
+    return optimal_batch_size
 
 def load_model(checkpoint_path: Path, device: torch.device) -> torch.nn.Module:
     """Load model from checkpoint (supports both Lightning and legacy formats)."""
@@ -198,6 +269,20 @@ def load_model(checkpoint_path: Path, device: torch.device) -> torch.nn.Module:
     
     encoder.eval().to(device)
     return encoder
+
+def optimize_model_for_inference(model: torch.nn.Module, use_channels_last: bool = False) -> torch.nn.Module:
+    """Apply inference optimizations to the model."""
+    model.eval()
+    
+    # Convert to channels_last for better performance on modern GPUs
+    if use_channels_last:
+        try:
+            model = model.to(memory_format=torch.channels_last)
+            print("✓ Model converted to channels_last memory format")
+        except Exception as e:
+            print(f"   Warning: Could not convert to channels_last: {e}")
+    
+    return model
 
 def load_data(args) -> Tuple[torch.utils.data.DataLoader, Optional[np.ndarray], dict]:
     """Load data and return DataLoader, spatial coordinates, and metadata."""
@@ -346,11 +431,35 @@ def main():
     # Load model
     encoder = load_model(args.checkpoint, device)
     
+    # Apply inference optimizations
+    encoder = optimize_model_for_inference(encoder, args.channels_last)
+    
     # Load data
     loader, spatial_coords, metadata = load_data(args)
     
-    # Optimize batch size for GPU memory
-    if device.type == "cuda" and args.optimize_memory:
+    # Auto-determine optimal batch size if requested
+    if args.auto_batch_size and device.type == "cuda":
+        # Get sample for batch size optimization
+        sample_batch = next(iter(loader))
+        if isinstance(sample_batch, (list, tuple)):
+            sample_input = sample_batch[0][:1]  # Single sample
+        else:
+            sample_input = sample_batch[:1]
+        
+        # Apply channels_last if requested
+        if args.channels_last and len(sample_input.shape) == 4:
+            sample_input = sample_input.to(memory_format=torch.channels_last)
+        
+        optimal_batch_size = find_optimal_batch_size(encoder, sample_input, device, args.batch_size)
+        
+        if optimal_batch_size != args.batch_size:
+            print(f"📊 Adjusting batch size: {args.batch_size} → {optimal_batch_size}")
+            args.batch_size = optimal_batch_size
+            # Recreate loader with optimal batch size
+            loader, spatial_coords, metadata = load_data(args)
+    
+    # Optimize batch size for GPU memory (legacy path)
+    elif device.type == "cuda" and args.optimize_memory:
         # Get a sample to estimate memory usage
         sample_batch = next(iter(loader))
         if isinstance(sample_batch, (list, tuple)):
@@ -405,20 +514,44 @@ def main():
     compiled_successfully = False
     if device.type == "cuda" and not args.no_compile:
         try:
-            import triton
-            if hasattr(torch, "compile"):
-                encoder = torch.compile(encoder, mode="reduce-overhead")
-                compiled_successfully = True
-                print("✓ Model compiled with torch.compile for faster inference")
-        except ImportError:
-            print("Warning: Triton not available - torch.compile disabled")
+            # Check PyTorch version first
+            torch_version = torch.__version__
+            major, minor = map(int, torch_version.split('.')[:2])
+            
+            if major >= 2:  # PyTorch 2.0+
+                # Try importing triton (may not be available on Windows)
+                try:
+                    import triton
+                    triton_available = True
+                except ImportError:
+                    triton_available = False
+                    print("   Note: Triton not available - using basic compilation")
+                
+                if hasattr(torch, "compile"):
+                    # Use more conservative compilation mode on Windows
+                    import platform
+                    if platform.system() == "Windows":
+                        # Windows-safe compilation
+                        encoder = torch.compile(encoder, mode="default", dynamic=False)
+                    else:
+                        # Full optimization on Linux/macOS
+                        encoder = torch.compile(encoder, mode="reduce-overhead", dynamic=False)
+                    
+                    compiled_successfully = True
+                    print("✓ Model compiled with torch.compile for faster inference")
+                else:
+                    print("   torch.compile not available in this PyTorch version")
+            else:
+                print(f"   torch.compile requires PyTorch 2.0+ (current: {torch_version})")
+                
         except Exception as e:
-            print(f"Warning: Could not compile model: {e}")
+            print(f"   Warning: Could not compile model: {e}")
+            print("   Continuing with uncompiled model...")
     elif args.no_compile:
         print("torch.compile disabled by user")
     
     if not compiled_successfully:
-        print("Using standard PyTorch inference")
+        print("Using standard PyTorch inference (no compilation)")
     
     # Generate embeddings
     print("Generating embeddings...")
@@ -438,17 +571,23 @@ def main():
         else:
             batch = batch_data
         
-        # Move to device
+        # Apply memory format optimization
+        if args.channels_last and len(batch.shape) == 4:
+            batch = batch.to(memory_format=torch.channels_last)
+        
+        # Move to device with optimized transfer
         batch = batch.to(device, non_blocking=True)
         
-        # Forward pass with optional mixed precision
+        # Forward pass with optional mixed precision and optimizations
         if use_amp:
             with torch.cuda.amp.autocast():
-                z = encoder(batch)
+                with torch.inference_mode():  # More efficient than no_grad for inference
+                    z = encoder(batch)
         else:
-            z = encoder(batch)
+            with torch.inference_mode():
+                z = encoder(batch)
         
-        # Move back to CPU and store
+        # Move back to CPU and store (with optimized memory pinning)
         z = z.cpu()
         latents.append(z)
         
@@ -457,7 +596,7 @@ def main():
         batch_time = time.time() - batch_start_time
         samples_per_sec = batch.size(0) / batch_time
         
-        # Update progress bar
+        # Update progress bar with enhanced metrics
         progress_info = {
             "samples/sec": f"{samples_per_sec:.0f}",
             "progress": f"{processed_samples}/{total_samples}"
@@ -465,14 +604,18 @@ def main():
         
         if device.type == "cuda":
             gpu_memory_used = torch.cuda.memory_allocated(device) / 1024**3
+            gpu_memory_cached = torch.cuda.memory_reserved(device) / 1024**3
             progress_info["GPU_mem"] = f"{gpu_memory_used:.1f}GB"
+            progress_info["GPU_cached"] = f"{gpu_memory_cached:.1f}GB"
         
         progress_bar.set_postfix(progress_info)
         
-        # Memory cleanup
-        if args.optimize_memory and (batch_idx + 1) % 10 == 0:
+        # Aggressive memory cleanup for large datasets
+        if args.optimize_memory and (batch_idx + 1) % 5 == 0:  # More frequent cleanup
+            del batch  # Explicit cleanup
             if device.type == "cuda":
                 torch.cuda.empty_cache()
+                torch.cuda.synchronize()  # Ensure operations complete
             gc.collect()
     
     progress_bar.close()
