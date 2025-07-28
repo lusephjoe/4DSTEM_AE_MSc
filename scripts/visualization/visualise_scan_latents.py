@@ -9,8 +9,8 @@ Make a mosaic:
 Usage - default bright-field virtual detector
 --------------------------------------------
 python scripts/visualise_scan_latents.py \
-       --raw      data/ae_train.pt \
-       --latents  outputs/embeddings.npz \    # .pt, .npy, or .npz supported
+       --raw      data/patterns.h5 \         # .pt, .h5, .npy, or .npz supported
+       --latents  outputs/embeddings.npz \   # .pt, .npy, or .npz supported
        --scan     512 512 \
        --virtual  bf             # or df
        --lat_max_cols 6          # grid width for latent maps
@@ -37,7 +37,7 @@ except ImportError:
 
 # ─────────────────────────── helpers ────────────────────────────
 def load_tensor(path: Path) -> np.ndarray:
-    """Load .pt, .npy, or .npz → numpy array"""
+    """Load .pt, .npy, .npz, or .h5 → numpy array"""
     if path.suffix in {".pt", ".pth"}:
         return torch.load(path, map_location="cpu").numpy()
     elif path.suffix == ".npy":
@@ -57,8 +57,35 @@ def load_tensor(path: Path) -> np.ndarray:
                 return data[keys[0]]
             else:
                 raise ValueError(f"No arrays found in .npz file: {path}")
+    elif path.suffix in {".h5", ".hdf5"}:
+        # For HDF5 files, look for common dataset names
+        import h5py
+        with h5py.File(path, 'r') as f:
+            # Try common dataset names for 4D-STEM data
+            if 'data' in f:
+                data = f['data'][:]
+            elif 'patterns' in f:
+                data = f['patterns'][:]
+            elif 'array' in f:
+                data = f['array'][:]
+            else:
+                # Use first dataset found
+                keys = list(f.keys())
+                if keys:
+                    dataset_name = keys[0]
+                    print(f"Warning: Using first dataset '{dataset_name}' from .h5 file")
+                    data = f[dataset_name][:]
+                else:
+                    raise ValueError(f"No datasets found in .h5 file: {path}")
+        
+        # Convert to float32 and add channel dimension if needed
+        data = data.astype(np.float32)
+        if len(data.shape) == 3:  # (N, Qy, Qx) -> (N, 1, Qy, Qx)
+            data = data[:, np.newaxis, :, :]
+        
+        return data
     else:
-        raise ValueError(f"Unknown file type {path.suffix}. Supported: .pt, .pth, .npy, .npz")
+        raise ValueError(f"Unknown file type {path.suffix}. Supported: .pt, .pth, .npy, .npz, .h5, .hdf5")
 
 
 def radial_mask(shape: tuple[int, int], r_min: float, r_max: float) -> np.ndarray:
@@ -114,8 +141,9 @@ except ImportError:
 def parse():
     p = argparse.ArgumentParser()
     p.add_argument("--raw", required=True, type=Path,
-                   help="4D-STEM tensor N*1*Qy*Qx (output of convert_dm4.py)")
-    p.add_argument("--latents", required=True, type=Path)
+                   help="4D-STEM data: .pt, .h5/.hdf5, .npy, or .npz format")
+    p.add_argument("--latents", required=True, type=Path,
+                   help="Latent embeddings: .pt, .npy, or .npz format")
     p.add_argument("--scan", nargs=2, type=int, metavar=("Ny", "Nx"),
                    help="Scan grid dimensions (required if no spatial coordinates in files)")
     p.add_argument("--coords", type=Path,
