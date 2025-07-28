@@ -83,6 +83,8 @@ def parse_args():
                    help="Number of data loader workers (0=single-threaded, safer on Windows)")
     p.add_argument("--prefetch_factor", type=int, default=2,
                    help="Number of batches to prefetch per worker")
+    p.add_argument("--persistent_workers", action="store_true",
+                   help="Keep workers alive between batches (only with num_workers > 0)")
     p.add_argument("--optimize_memory", action="store_true",
                    help="Enable memory optimizations for large datasets")
     p.add_argument("--auto_batch_size", action="store_true",
@@ -623,23 +625,7 @@ def main():
     print(f"Number of batches: {len(loader)}")
     
     if args.debug:
-        print("Debug mode enabled - processing first batch only")
-        loader_iter = iter(loader)
-        test_batch = next(loader_iter)
-        print(f"First batch type: {type(test_batch)}")
-        if isinstance(test_batch, (list, tuple)):
-            print(f"Batch tuple length: {len(test_batch)}")
-            print(f"First element shape: {test_batch[0].shape}")
-            print(f"First element dtype: {test_batch[0].dtype}")
-        else:
-            print(f"Batch tensor shape: {test_batch.shape}")
-            print(f"Batch tensor dtype: {test_batch.dtype}")
-        
-        # Reset loader
-        loader = torch.utils.data.DataLoader(loader.dataset, **{
-            k: v for k, v in loader.__dict__.items() 
-            if k in ['batch_size', 'num_workers', 'pin_memory', 'persistent_workers', 'drop_last']
-        })
+        print("Debug mode enabled - will show details for first few batches")
     
     # Use tqdm with more verbose settings
     progress_bar = tqdm(
