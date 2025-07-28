@@ -97,7 +97,7 @@ def parse_args():
     return p.parse_args()
 
 def setup_device(device_str: str) -> torch.device:
-    """Setup compute device with optimizations."""
+    """Setup compute device with maximum optimizations."""
     if device_str == "auto":
         if torch.cuda.is_available():
             device = torch.device("cuda")
@@ -108,13 +108,45 @@ def setup_device(device_str: str) -> torch.device:
     else:
         device = torch.device(device_str)
     
-    # Enable optimizations for CUDA
+    # Enable maximum optimizations for CUDA
     if device.type == "cuda":
+        # Core CUDA optimizations
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        print(f"CUDA optimizations enabled on {torch.cuda.get_device_name()}")
-        print(f"Initial GPU memory: {torch.cuda.memory_allocated(device) / 1024**3:.2f} GB")
+        
+        # Advanced optimizations for modern GPUs
+        if hasattr(torch.backends.cuda, 'flash_sdp_enabled'):
+            torch.backends.cuda.flash_sdp_enabled(True)
+        if hasattr(torch.backends.cuda, 'math_sdp_enabled'):
+            torch.backends.cuda.math_sdp_enabled(True)
+        if hasattr(torch.backends.cuda, 'mem_efficient_sdp_enabled'):
+            torch.backends.cuda.mem_efficient_sdp_enabled(True)
+        
+        # Set memory allocator optimizations
+        torch.cuda.empty_cache()
+        if hasattr(torch.cuda, 'set_per_process_memory_fraction'):
+            # Reserve 10% for system processes
+            torch.cuda.set_per_process_memory_fraction(0.9)
+        
+        # Enable memory pool for faster allocations
+        try:
+            torch.cuda.memory._set_allocator_settings('expandable_segments:True')
+        except:
+            pass  # Not available on all CUDA versions
+        
+        device_props = torch.cuda.get_device_properties(device)
+        print(f"🚀 CUDA optimizations enabled on {device_props.name}")
+        print(f"   Compute capability: {device_props.major}.{device_props.minor}")
+        print(f"   Total memory: {device_props.total_memory / 1024**3:.1f} GB")
+        print(f"   Initial GPU memory: {torch.cuda.memory_allocated(device) / 1024**3:.2f} GB")
+        
+        # Check for Tensor Core support
+        if device_props.major >= 7:  # V100, A100, etc.
+            print(f"   ✓ Tensor Core support available")
+        
+    elif device.type == "mps":
+        print(f"🍎 MPS optimizations enabled")
     
     return device
 
