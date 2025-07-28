@@ -269,7 +269,7 @@ def main():
     
     device = next(model.parameters()).device
     
-    print(f"\n🔍 RUNNING VERIFICATION ON {device.upper()}")
+    print(f"\n🔍 RUNNING VERIFICATION ON {str(device).upper()}")
     print("-" * 40)
     
     # 1. Test different loss scales
