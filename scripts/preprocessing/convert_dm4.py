@@ -31,12 +31,10 @@ import h5py
 # ─────────────────────────── helpers ────────────────────────────
 
 def normalise(x: np.ndarray) -> np.ndarray:
-    """Scale array to [0,1] float32 with log scaling"""
-    x = x.astype("float32", copy=False)
-    x = np.log(x + 1e-6)  # Log scaling with small epsilon to avoid log(0)
-    x -= x.min()
-    x /= x.max() + 1e-6
-    return x
+    """Convert to float32 without any scaling - normalization handled by train.py"""
+    # REMOVED: Log scaling and [0,1] normalization to avoid double normalization
+    # train.py will handle all normalization (log transform + z-score)
+    return x.astype("float32", copy=False)
 
 
 def block_bin_mean(arr: np.ndarray, k: int) -> np.ndarray:
