@@ -55,10 +55,11 @@ def setup_logging(output_dir: Path, args, timestamp: str) -> logging.Logger:
     return logger
 
 class HDF5Dataset(Dataset):
-    """Optimized dataset for lazy loading of HDF5-compressed 4D-STEM data with pre-computed normalization."""
+    """Optimized dataset for lazy loading of HDF5-compressed 4D-STEM data with optional normalization."""
     
-    def __init__(self, data_path, metadata_path=None):
+    def __init__(self, data_path, metadata_path=None, use_normalization=True):
         self.data_path = Path(data_path)
+        self.use_normalization = use_normalization
         
         # Only support HDF5 files now
         if self.data_path.suffix != '.h5':
@@ -81,9 +82,14 @@ class HDF5Dataset(Dataset):
                 print("Warning: No metadata found in HDF5 file, using defaults")
                 self.metadata = {"data_min": 0.0, "data_max": 1.0, "data_range": 1.0, "dtype": "float16"}
         
-        # Load or compute global normalization statistics ONCE
-        print("Loading/computing normalization statistics...")
-        self._load_or_compute_global_stats()
+        # Load or compute global normalization statistics ONCE (only if normalization enabled)
+        if self.use_normalization:
+            print("Loading/computing normalization statistics...")
+            self._load_or_compute_global_stats()
+        else:
+            print("Normalization disabled - training directly on log data")
+            self.global_log_mean = 0.0
+            self.global_log_std = 1.0
         
         print(f"Loaded HDF5 dataset: {self.shape} patterns, dtype: {self.metadata['dtype']}")
         print(f"Data range: {self.metadata['data_min']:.3f} to {self.metadata['data_min'] + self.metadata['data_range']:.3f}")
@@ -240,9 +246,12 @@ class HDF5Dataset(Dataset):
         # Apply dequantization (cached from init)
         x = self._dequantize_fast(x)
         
-        # Apply PRE-COMPUTED normalization (major speedup!)
+        # Apply log transform
         x = torch.log(x + 1)
-        x = (x - self.global_log_mean) / (self.global_log_std + 1e-8)
+        
+        # Apply normalization only if enabled
+        if self.use_normalization:
+            x = (x - self.global_log_mean) / (self.global_log_std + 1e-8)
         
         # Ensure channel dimension
         if x.dim() == 2:
@@ -285,6 +294,7 @@ class LitAE(pl.LightningModule):
         # These will be set by the data loader
         self.register_buffer('global_log_mean', torch.tensor(0.0))
         self.register_buffer('global_log_std', torch.tensor(1.0))
+        self.use_normalization = True  # Will be set based on dataset
 
     def forward(self, x):
         return self.model(x)
@@ -293,27 +303,36 @@ class LitAE(pl.LightningModule):
         """Convert normalized tensor back to log space for scale-aligned loss computation."""
         return x_normalized * (self.global_log_std + 1e-8) + self.global_log_mean
     
-    def set_normalization_params(self, log_mean: float, log_std: float):
+    def set_normalization_params(self, log_mean: float, log_std: float, use_normalization: bool = True):
         """Set normalization parameters from data loader."""
         self.global_log_mean.data = torch.tensor(log_mean)
         self.global_log_std.data = torch.tensor(log_std)
+        self.use_normalization = use_normalization
 
     def training_step(self, batch, batch_idx):
         x, = batch
         z = self.model.embed(x)
         x_hat = self.model.decoder(z)
         
-        # SCALE-ALIGNED LOSS: Denormalize BOTH input and output to log space
-        # Both x and x_hat are in normalized space, so both need denormalization
-        x_log = self.denormalize_to_log_space(x)
-        x_hat_log = self.denormalize_to_log_space(x_hat)
+        # SCALE-ALIGNED LOSS: Denormalize BOTH input and output to log space (if normalization used)
+        if self.use_normalization:
+            # Both x and x_hat are in normalized space, so both need denormalization
+            x_log = self.denormalize_to_log_space(x)
+            x_hat_log = self.denormalize_to_log_space(x_hat)
+        else:
+            # Data is already in log space, no denormalization needed
+            x_log = x
+            x_hat_log = x_hat
         
         # Compute loss using flexible loss system in aligned log space
         loss_dict = self.model.compute_loss(x_log, x_hat_log, z)
         loss = loss_dict['total_loss']
 
-        # ADDITIONAL: Compute MSE in normalized space for comparison with reference papers
-        mse_normalized = torch.mean((x - x_hat)**2)
+        # ADDITIONAL: Compute MSE in input space for comparison with reference papers
+        if self.use_normalization:
+            mse_input_space = torch.mean((x - x_hat)**2)  # Normalized space MSE
+        else:
+            mse_input_space = torch.mean((x - x_hat)**2)  # Log space MSE (reference-like)
 
         # OPTIMIZATION: Record losses much less frequently to reduce CPU-GPU sync
         if batch_idx % 50 == 0:  # Reduced from every 10 steps
@@ -321,7 +340,10 @@ class LitAE(pl.LightningModule):
 
         # Log essential metrics only
         self.log("train_loss", loss, prog_bar=True)
-        self.log("train_mse_normalized", mse_normalized, prog_bar=True)  # Reference-comparable MSE
+        if self.use_normalization:
+            self.log("train_mse_normalized", mse_input_space, prog_bar=True)  # Normalized space MSE
+        else:
+            self.log("train_mse_log", mse_input_space, prog_bar=True)  # Log space MSE (reference-like)
         
         # Log main reconstruction loss (dynamically based on loss type)
         recon_loss_key = f"{self.model.loss_manager.reconstruction_loss.name}_loss"
@@ -336,24 +358,35 @@ class LitAE(pl.LightningModule):
         z = self.model.embed(x)
         x_hat = self.model.decoder(z)
         
-        # SCALE-ALIGNED LOSS: Denormalize BOTH input and output to log space
-        # Both x and x_hat are in normalized space, so both need denormalization
-        x_log = self.denormalize_to_log_space(x)
-        x_hat_log = self.denormalize_to_log_space(x_hat)
+        # SCALE-ALIGNED LOSS: Denormalize BOTH input and output to log space (if normalization used)
+        if self.use_normalization:
+            # Both x and x_hat are in normalized space, so both need denormalization
+            x_log = self.denormalize_to_log_space(x)
+            x_hat_log = self.denormalize_to_log_space(x_hat)
+        else:
+            # Data is already in log space, no denormalization needed
+            x_log = x
+            x_hat_log = x_hat
         
         # Compute loss using flexible loss system in aligned log space
         loss_dict = self.model.compute_loss(x_log, x_hat_log, z)
         loss = loss_dict['total_loss']
         
-        # ADDITIONAL: Compute MSE in normalized space for comparison with reference papers
-        mse_normalized = torch.mean((x - x_hat)**2)
+        # ADDITIONAL: Compute MSE in input space for comparison with reference papers
+        if self.use_normalization:
+            mse_input_space = torch.mean((x - x_hat)**2)  # Normalized space MSE
+        else:
+            mse_input_space = torch.mean((x - x_hat)**2)  # Log space MSE (reference-like)
         
         # Calculate detailed metrics for validation (use denormalized data)
         metrics = calculate_metrics(x_log, x_hat_log)
         diffraction_metrics = calculate_diffraction_metrics(x_log, x_hat_log)
         
         self.log("val_loss", loss, prog_bar=True)
-        self.log("val_mse_normalized", mse_normalized, prog_bar=True)  # Reference-comparable MSE
+        if self.use_normalization:
+            self.log("val_mse_normalized", mse_input_space, prog_bar=True)  # Normalized space MSE
+        else:
+            self.log("val_mse_log", mse_input_space, prog_bar=True)  # Log space MSE (reference-like)
         
         # Log main reconstruction loss (dynamically based on loss type)
         recon_loss_key = f"{self.model.loss_manager.reconstruction_loss.name}_loss"
@@ -406,11 +439,11 @@ class LitAE(pl.LightningModule):
         }
 
 
-def load_dataset(data_path, logger):
+def load_dataset(data_path, logger, use_normalization=True):
     """Load dataset and detect input size."""
     if data_path.suffix == '.h5':
         logger.info(f"Loading HDF5 dataset from: {data_path}")
-        dataset = HDF5Dataset(data_path)
+        dataset = HDF5Dataset(data_path, use_normalization=use_normalization)
         sample = dataset[0][0] if isinstance(dataset[0], tuple) else dataset[0]
         detected_size = sample.shape[-1]
     else:
@@ -778,6 +811,7 @@ def main():
     p.add_argument("--save_every_n_epochs", type=int, default=1, help="Save checkpoint every N epochs (default: 1)")
     p.add_argument("--accumulate_grad_batches", type=int, default=1, help="Number of batches to accumulate gradients over (default: 1)")
     p.add_argument("--resume_from_checkpoint", type=Path, default=None, help="Path to checkpoint file to resume training from")
+    p.add_argument("--no_normalization", action="store_true", help="Skip z-score normalization, train directly on log data (like reference code)")
 
     args = p.parse_args()
 
@@ -805,7 +839,8 @@ def main():
 
     # Load data and create datasets
     data_path = Path(args.data)
-    full_dataset, detected_size = load_dataset(data_path, logger)
+    use_normalization = not args.no_normalization
+    full_dataset, detected_size = load_dataset(data_path, logger, use_normalization)
     train_ds, val_ds = create_train_val_split(full_dataset, args.no_validation, logger)
     
     # Create data loaders and model
@@ -813,8 +848,11 @@ def main():
     model = create_model(args, detected_size)
     
     # SCALE-ALIGNED LOSS: Set normalization parameters from dataset
-    model.set_normalization_params(train_ds.global_log_mean, train_ds.global_log_std)
-    logger.info(f"Scale-aligned loss enabled: log_mean={train_ds.global_log_mean:.4f}, log_std={train_ds.global_log_std:.4f}")
+    model.set_normalization_params(train_ds.global_log_mean, train_ds.global_log_std, train_ds.use_normalization)
+    if train_ds.use_normalization:
+        logger.info(f"Scale-aligned loss enabled: log_mean={train_ds.global_log_mean:.4f}, log_std={train_ds.global_log_std:.4f}")
+    else:
+        logger.info("Training directly on log data (no normalization) - like reference code")
     
     # Log loss configuration
     loss_info = model.model.get_loss_info()
