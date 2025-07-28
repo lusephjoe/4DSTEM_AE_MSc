@@ -177,8 +177,8 @@ class HDF5Dataset(Dataset):
                     elif self.metadata["dtype"] == "float16":
                         chunk_data = chunk_data.astype("float32")
                     
-                    # Apply log scaling (vectorized)
-                    log_chunk = np.log(chunk_data + 1e-6)
+                    # Apply log scaling (vectorized) - must match training transform
+                    log_chunk = np.log(chunk_data + 1)
                     
                     # Sample pixels efficiently: flatten all patterns then subsample
                     flat_chunk = log_chunk.flatten()
@@ -241,7 +241,7 @@ class HDF5Dataset(Dataset):
         x = self._dequantize_fast(x)
         
         # Apply PRE-COMPUTED normalization (major speedup!)
-        x = torch.log(x + 1e-6)
+        x = torch.log(x + 1)
         x = (x - self.global_log_mean) / (self.global_log_std + 1e-8)
         
         # Ensure channel dimension
