@@ -81,8 +81,8 @@ def parse_args():
     # Performance arguments
     p.add_argument("--num_workers", type=int, default=4,  # Default to 4 like training
                    help="Number of data loader workers (4=default, same as training)")
-    p.add_argument("--prefetch_factor", type=int, default=4,  # Same as training
-                   help="Number of batches to prefetch per worker")
+    p.add_argument("--prefetch_factor", type=int, default=8,  # Higher for embedding generation
+                   help="Number of batches to prefetch per worker (higher=smoother GPU usage)")
     p.add_argument("--persistent_workers", action="store_true", default=True,
                    help="Keep workers alive between batches (default: True for better performance)")
     p.add_argument("--no_persistent_workers", action="store_true",
@@ -374,9 +374,9 @@ def load_data(args) -> Tuple[torch.utils.data.DataLoader, Optional[np.ndarray], 
         'drop_last': False,  # Keep all samples
     }
     
-    # Add prefetch factor for better performance
+    # OPTIMIZATION: Higher prefetch factor for smoother GPU pipeline
     if num_workers > 0:
-        dataloader_kwargs['prefetch_factor'] = 4  # Same as training
+        dataloader_kwargs['prefetch_factor'] = args.prefetch_factor  # Higher for continuous GPU usage
     
     # Use spawn context for HDF5 compatibility (same as training)
     if num_workers > 0:
@@ -698,13 +698,17 @@ def main():
                     if args.debug and batch_idx == 0:
                         print(f"  Direct batch shape: {batch.shape}")
                 
-                # Optimized GPU transfer with non_blocking and pin_memory
+                # GPU pipeline optimization - overlap data transfer with computation
                 if device.type == "cuda":
+                    # Non-blocking transfer for pipeline overlap
                     batch = batch.to(device, non_blocking=True)
                     
                     # Apply channels_last memory format if requested
                     if args.channels_last and len(batch.shape) == 4:
                         batch = batch.to(memory_format=torch.channels_last)
+                    
+                    # Ensure GPU sync before computation for consistent timing
+                    torch.cuda.synchronize()
                 else:
                     batch = batch.to(device)
                 
@@ -715,11 +719,17 @@ def main():
                 else:
                     z = encoder(batch)
                 
+                # Async GPU->CPU transfer to overlap with next batch loading
+                if device.type == "cuda":
+                    z_cpu = z.cpu()
+                    # Don't sync here - let it run async
+                else:
+                    z_cpu = z.cpu()
+                
                 if args.debug and batch_idx == 0:
                     print(f"  Embedding shape: {z.shape}")
                 
-                # Efficient CPU transfer and storage
-                z_cpu = z.cpu()
+                # Store result (z_cpu already computed above)
                 latents.append(z_cpu)
                 
                 # Update progress with optimized metrics

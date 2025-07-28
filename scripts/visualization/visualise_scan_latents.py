@@ -10,7 +10,7 @@ Usage - default bright-field virtual detector
 --------------------------------------------
 python scripts/visualise_scan_latents.py \
        --raw      data/ae_train.pt \
-       --latents  outputs/embeddings.pt \
+       --latents  outputs/embeddings.npz \    # .pt, .npy, or .npz supported
        --scan     512 512 \
        --virtual  bf             # or df
        --lat_max_cols 6          # grid width for latent maps
@@ -37,12 +37,28 @@ except ImportError:
 
 # ─────────────────────────── helpers ────────────────────────────
 def load_tensor(path: Path) -> np.ndarray:
-    """Load .pt or .npy → numpy array"""
+    """Load .pt, .npy, or .npz → numpy array"""
     if path.suffix in {".pt", ".pth"}:
         return torch.load(path, map_location="cpu").numpy()
-    if path.suffix == ".npy":
+    elif path.suffix == ".npy":
         return np.load(path)
-    raise ValueError(f"Unknown file type {path}")
+    elif path.suffix == ".npz":
+        # For .npz files, assume 'data' key for raw data, 'embeddings' key for latents
+        data = np.load(path)
+        if 'embeddings' in data:
+            return data['embeddings']
+        elif 'data' in data:
+            return data['data']
+        else:
+            # If no standard keys, use the first array
+            keys = list(data.keys())
+            if keys:
+                print(f"Warning: Using first array '{keys[0]}' from .npz file")
+                return data[keys[0]]
+            else:
+                raise ValueError(f"No arrays found in .npz file: {path}")
+    else:
+        raise ValueError(f"Unknown file type {path.suffix}. Supported: .pt, .pth, .npy, .npz")
 
 
 def radial_mask(shape: tuple[int, int], r_min: float, r_max: float) -> np.ndarray:
@@ -101,7 +117,7 @@ def parse():
                    help="4D-STEM tensor N*1*Qy*Qx (output of convert_dm4.py)")
     p.add_argument("--latents", required=True, type=Path)
     p.add_argument("--scan", nargs=2, type=int, metavar=("Ny", "Nx"),
-                   help="Scan grid if coords not given")
+                   help="Scan grid dimensions (required if no spatial coordinates in files)")
     p.add_argument("--coords", type=Path,
                    help="Optional .npy (N,2) (y,x) coordinates for irregular scan")
     p.add_argument("--virtual", choices=["bf", "df"], default="bf",
@@ -127,10 +143,40 @@ def main():
 
     # coordinates & mapping ---------------------------------------------------
     if args.coords is not None:
-        coords = np.load(args.coords)    # (N,2) float32 (y,x)
-        Ny = coords[:, 0].max()+1
-        Nx = coords[:, 1].max()+1
+        # Load coordinates from separate file
+        if args.coords.suffix == ".npz":
+            coord_data = np.load(args.coords)
+            if 'spatial_coordinates' in coord_data:
+                coords = coord_data['spatial_coordinates']
+            elif 'coords' in coord_data:
+                coords = coord_data['coords']
+            else:
+                # Use first available array
+                keys = list(coord_data.keys())
+                coords = coord_data[keys[0]]
+                print(f"Warning: Using '{keys[0]}' as coordinates from .npz file")
+        else:
+            coords = np.load(args.coords)    # (N,2) float32 (y,x)
+        Ny = int(coords[:, 0].max()) + 1
+        Nx = int(coords[:, 1].max()) + 1
+    elif args.latents.suffix == ".npz":
+        # Check if latents file contains spatial coordinates
+        latent_data = np.load(args.latents)
+        if 'spatial_coordinates' in latent_data:
+            coords = latent_data['spatial_coordinates']
+            Ny = int(coords[:, 0].max()) + 1
+            Nx = int(coords[:, 1].max()) + 1
+            print("Using spatial coordinates from latents .npz file")
+        else:
+            # Fall back to scan dimensions
+            if args.scan is None:
+                raise ValueError("Must provide --scan dimensions when no spatial coordinates available")
+            Ny, Nx = args.scan
+            coords = np.stack(np.unravel_index(np.arange(N), (Ny, Nx)), axis=-1)
     else:
+        # Use provided scan dimensions
+        if args.scan is None:
+            raise ValueError("Must provide --scan dimensions when no coordinates available")
         Ny, Nx = args.scan
         coords = np.stack(np.unravel_index(np.arange(N), (Ny, Nx)), axis=-1)
 
