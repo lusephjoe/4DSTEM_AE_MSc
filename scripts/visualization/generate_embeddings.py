@@ -64,8 +64,8 @@ def parse_args():
     # Data processing arguments
     p.add_argument("--n_samples", type=int, default=None,
                    help="Number of samples to process (None = all)")
-    p.add_argument("--batch_size", type=int, default=128,
-                   help="Batch size for processing")
+    p.add_argument("--batch_size", type=int, default=256,
+                   help="Batch size for processing (default: 256 for RTX A6000)")
     p.add_argument("--no_normalization", action="store_true",
                    help="Disable data normalization (for HDF5 data)")
     
@@ -388,21 +388,48 @@ def load_data(args) -> Tuple[torch.utils.data.DataLoader, Optional[np.ndarray], 
     
     # Create data loader with error handling (same as training)
     try:
+        print("Creating DataLoader...")
+        start_loader_time = time.time()
         loader = torch.utils.data.DataLoader(dataset, **dataloader_kwargs)
+        loader_creation_time = time.time() - start_loader_time
+        print(f"✓ DataLoader created in {loader_creation_time:.2f}s")
         
         # Test the data loader to catch issues early
         if num_workers > 0:
             print("Testing multiprocessing data loader...")
+            test_start = time.time()
             try:
+                print("   Attempting to load first batch...")
                 test_batch = next(iter(loader))
+                test_time = time.time() - test_start
+                
                 if isinstance(test_batch, (list, tuple)):
                     test_shape = test_batch[0].shape
-                    print(f"✓ Multiprocessing test successful: batch shape {test_shape}")
+                    print(f"✓ First batch loaded in {test_time:.2f}s: shape {test_shape}")
                     print(f"   Batch format: tuple with {len(test_batch)} elements")
                 else:
                     test_shape = test_batch.shape  
-                    print(f"✓ Multiprocessing test successful: batch shape {test_shape}")
+                    print(f"✓ First batch loaded in {test_time:.2f}s: shape {test_shape}")
                     print(f"   Batch format: tensor")
+                
+                # Test a few more batches to see if workers are truly working
+                print("   Testing batch loading speed...")
+                batch_times = []
+                test_iter = iter(loader)
+                for i in range(min(3, len(loader))):
+                    batch_start = time.time()
+                    next(test_iter)
+                    batch_time = time.time() - batch_start
+                    batch_times.append(batch_time)
+                    print(f"   Batch {i+1}: {batch_time:.3f}s")
+                
+                avg_batch_time = sum(batch_times) / len(batch_times)
+                print(f"   Average batch loading time: {avg_batch_time:.3f}s")
+                
+                if avg_batch_time > 2.0:
+                    print("⚠️  WARNING: Batch loading is slow! This will cause the processing delay.")
+                    print("   Consider reducing --num_workers or checking HDF5 file access speed")
+                
             except Exception as e:
                 print(f"   Multiprocessing test failed: {e}")
                 raise e
@@ -622,88 +649,105 @@ def main():
     if not compiled_successfully:
         print("Using standard PyTorch inference (no compilation)")
     
-    # Generate embeddings (using simple approach like training)
+    # Generate embeddings (optimized GPU processing pipeline)
     print("Generating embeddings...")
     latents = []
     total_samples = len(loader.dataset)
-    processed_samples = 0
     start_time = time.time()
     
     print(f"Total samples to process: {total_samples}")
     print(f"Number of batches: {len(loader)}")
+    print(f"GPU batch processing optimizations enabled")
     
     if args.debug:
         print("Debug mode enabled - will show details for first few batches")
     
-    # Use tqdm with more verbose settings
+    # Set model to eval mode and enable inference optimizations
+    encoder.eval()
+    
+    # Enable torch inference mode for maximum speed (PyTorch 1.9+)
+    inference_mode_context = torch.inference_mode() if hasattr(torch, 'inference_mode') else torch.no_grad()
+    
+    # Use tqdm with faster update settings
     progress_bar = tqdm(
         loader, 
         desc="Processing batches", 
         unit="batch",
         total=len(loader),
-        ncols=100,
-        mininterval=1.0  # Update every second
+        ncols=120,
+        mininterval=0.5,  # Update every 0.5 seconds
+        smoothing=0.1     # Faster smoothing for more responsive display
     )
     
-    try:
-        for batch_idx, batch_data in enumerate(progress_bar):
-            if args.debug and batch_idx == 0:
-                print(f"\nProcessing batch {batch_idx}")
-                print(f"  Raw batch type: {type(batch_data)}")
-            
-            batch_start_time = time.time()
-            
-            # Handle batch format exactly like training
-            if isinstance(batch_data, (list, tuple)):
-                batch = batch_data[0]  # HDF5Dataset returns tuple (x,)
+    with inference_mode_context:
+        try:
+            for batch_idx, batch_data in enumerate(progress_bar):
                 if args.debug and batch_idx == 0:
-                    print(f"  Extracted batch shape: {batch.shape}")
-            else:
-                batch = batch_data
-                if args.debug and batch_idx == 0:
-                    print(f"  Direct batch shape: {batch.shape}")
-            
-            # Move to device (simple, like training)
-            batch = batch.to(device, non_blocking=True)
-            
-            # Forward pass (simple, like training)
-            with torch.no_grad():  # Use simple no_grad like training
-                z = encoder(batch)
-            
-            if args.debug and batch_idx == 0:
-                print(f"  Embedding shape: {z.shape}")
-            
-            # Store result
-            z = z.cpu()
-            latents.append(z)
-            
-            # Update progress
-            processed_samples += batch.size(0)
-            batch_time = time.time() - batch_start_time
-            samples_per_sec = batch.size(0) / batch_time
-            
-            # Simple progress info
-            progress_info = {
-                "samples/sec": f"{samples_per_sec:.0f}",
-                "batch": f"{batch_idx+1}/{len(loader)}"
-            }
-            
-            if device.type == "cuda":
-                gpu_memory_used = torch.cuda.memory_allocated(device) / 1024**3
-                progress_info["GPU"] = f"{gpu_memory_used:.1f}GB"
-            
-            progress_bar.set_postfix(progress_info)
-            
-            # Simple memory cleanup
-            if (batch_idx + 1) % 10 == 0:
-                if device.type == "cuda":
-                    torch.cuda.empty_cache()
-                gc.collect()
+                    print(f"\nProcessing batch {batch_idx}")
+                    print(f"  Raw batch type: {type(batch_data)}")
                 
-            # Debug: process only first few batches
-            if args.debug and batch_idx >= 2:
-                print("Debug mode: stopping after 3 batches")
-                break
+                batch_start_time = time.time()
+                
+                # Handle batch format exactly like training
+                if isinstance(batch_data, (list, tuple)):
+                    batch = batch_data[0]  # HDF5Dataset returns tuple (x,)
+                    if args.debug and batch_idx == 0:
+                        print(f"  Extracted batch shape: {batch.shape}")
+                else:
+                    batch = batch_data
+                    if args.debug and batch_idx == 0:
+                        print(f"  Direct batch shape: {batch.shape}")
+                
+                # Optimized GPU transfer with non_blocking and pin_memory
+                if device.type == "cuda":
+                    batch = batch.to(device, non_blocking=True)
+                    
+                    # Apply channels_last memory format if requested
+                    if args.channels_last and len(batch.shape) == 4:
+                        batch = batch.to(memory_format=torch.channels_last)
+                else:
+                    batch = batch.to(device)
+                
+                # Optimized forward pass with mixed precision if enabled
+                if use_amp and device.type == "cuda":
+                    with torch.autocast(device_type='cuda', dtype=torch.float16):
+                        z = encoder(batch)
+                else:
+                    z = encoder(batch)
+                
+                if args.debug and batch_idx == 0:
+                    print(f"  Embedding shape: {z.shape}")
+                
+                # Efficient CPU transfer and storage
+                z_cpu = z.cpu()
+                latents.append(z_cpu)
+                
+                # Update progress with optimized metrics
+                batch_time = time.time() - batch_start_time
+                samples_per_sec = batch.size(0) / batch_time
+                
+                # Optimized progress info
+                progress_info = {
+                    "sps": f"{samples_per_sec:.0f}",  # Shorter key
+                    "batch": f"{batch_idx+1}/{len(loader)}"
+                }
+                
+                if device.type == "cuda":
+                    gpu_memory_used = torch.cuda.memory_allocated(device) / 1024**3
+                    progress_info["GPU"] = f"{gpu_memory_used:.1f}GB"
+                
+                progress_bar.set_postfix(progress_info)
+                
+                # Aggressive memory cleanup for faster processing
+                if (batch_idx + 1) % 5 == 0:  # More frequent cleanup
+                    if device.type == "cuda":
+                        torch.cuda.empty_cache()
+                    # Skip gc.collect() for speed - let Python handle it
+                    
+                # Debug: process only first few batches
+                if args.debug and batch_idx >= 2:
+                    print("Debug mode: stopping after 3 batches")
+                    break
                 
     except Exception as e:
         print(f"\nError during batch processing: {e}")
