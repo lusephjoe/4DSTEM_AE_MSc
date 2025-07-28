@@ -203,12 +203,12 @@ def main():
                                         new_axis=None,
                                         chunks=(new_safe_chunk_size, qy_final, qx_final))
     
-    # Skip min/max computation - handle precision later
-    print(f"Converting to {args.dtype} (skipping min/max computation)...")
+    # Skip min/max computation - we want to preserve raw intensity values
+    print(f"Converting to {args.dtype} (preserving raw intensities)...")
     
-    # Use default range for metadata
-    data_min, data_max = 0.0, 1.0
-    data_range = data_max - data_min
+    # Don't set artificial min/max values - let the data determine its own range
+    data_min, data_max = None, None
+    data_range = None
     
     with tqdm(total=1, desc=f"Converting to {args.dtype}", unit="operation") as pbar:
         if args.dtype == "uint16":
@@ -271,12 +271,16 @@ def main():
                                chunks=True,
                                shuffle=True)
         
-        # Store metadata as attributes
+        # Store metadata as attributes (compute actual data range)
+        actual_min = float(numpy_data.min())
+        actual_max = float(numpy_data.max())
+        actual_range = actual_max - actual_min
+        
         dset.attrs['original_shape'] = original_shape
         dset.attrs['final_shape'] = numpy_data.shape
-        dset.attrs['data_min'] = float(data_min)
-        dset.attrs['data_max'] = float(data_max)
-        dset.attrs['data_range'] = float(data_range)
+        dset.attrs['data_min'] = actual_min
+        dset.attrs['data_max'] = actual_max
+        dset.attrs['data_range'] = actual_range
         dset.attrs['dtype'] = args.dtype
         dset.attrs['downsample'] = args.downsample
         dset.attrs['scan_step'] = args.scan_step
@@ -288,13 +292,13 @@ def main():
     # Update args.output for metadata saving
     args.output = h5_output_path
     
-    # Save metadata for reconstruction
+    # Save metadata for reconstruction (use actual computed values)
     metadata = {
         "original_shape": original_shape,
         "final_shape": (total_patterns, qy_final, qx_final),
-        "data_min": float(data_min),
-        "data_max": float(data_max),
-        "data_range": float(data_range),
+        "data_min": float(actual_min),
+        "data_max": float(actual_max),
+        "data_range": float(actual_range),
         "dtype": args.dtype,
         "downsample": args.downsample,
         "scan_step": args.scan_step,
