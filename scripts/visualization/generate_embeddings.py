@@ -580,16 +580,18 @@ def main():
             major, minor = map(int, torch_version.split('.')[:2])
             
             if major >= 2:  # PyTorch 2.0+
-                # Try importing triton (may not be available on Windows)
+                # Check if Triton is available (required for torch.compile on CUDA)
+                triton_available = False
                 try:
                     import triton
                     triton_available = True
+                    print("   ✓ Triton available - full compilation enabled")
                 except ImportError:
                     triton_available = False
-                    print("   Note: Triton not available - using basic compilation")
+                    print("   ⚠ Triton not available - skipping torch.compile")
                 
-                if hasattr(torch, "compile"):
-                    # Use more conservative compilation mode on Windows
+                if hasattr(torch, "compile") and triton_available:
+                    # Only compile if Triton is available
                     import platform
                     if platform.system() == "Windows":
                         # Windows-safe compilation
@@ -600,6 +602,8 @@ def main():
                     
                     compiled_successfully = True
                     print("✓ Model compiled with torch.compile for faster inference")
+                elif not triton_available:
+                    print("   Skipping torch.compile - Triton required for CUDA compilation")
                 else:
                     print("   torch.compile not available in this PyTorch version")
             else:
