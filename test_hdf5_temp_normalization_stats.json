@@ -1,8 +1,0 @@
-{
-  "log_mean": -0.9904348538739437,
-  "log_std": 1.0030777097128287,
-  "n_samples_used": 100,
-  "pixels_sampled": 16400,
-  "computed_on": "2025-07-24T13:05:17.598503",
-  "method": "streaming_welford"
-}

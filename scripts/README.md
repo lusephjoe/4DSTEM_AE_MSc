@@ -14,7 +14,7 @@ scripts/
 ├── preprocessing/      # Data conversion and preprocessing
 │   ├── convert_dm4_to_hspy.py  # dm4 → hspy conversion (recommended)
 │   ├── preprocess.py           # Traditional preprocessing to tensors
-│   ├── convert_dm4.py          # Legacy conversion script
+│   ├── convert_dm4.py          # Most Complete Conversion script
 │   └── README.md               # Preprocessing documentation
 ├── visualization/      # Model evaluation and visualization
 │   ├── evaluate_autoencoder.py # Comprehensive model evaluation
