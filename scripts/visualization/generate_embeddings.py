@@ -310,6 +310,14 @@ class BatchOptimizedHDF5Dataset(torch.utils.data.Dataset):
         self.batch_size = batch_size
         self.total_samples = len(hdf5_dataset)
         
+        # Store essential info for multiprocessing
+        self.data_path = hdf5_dataset.data_path
+        self.use_normalization = hdf5_dataset.use_normalization
+        self.metadata = hdf5_dataset.metadata.copy()
+        if hasattr(hdf5_dataset, 'global_log_mean'):
+            self.global_log_mean = hdf5_dataset.global_log_mean
+            self.global_log_std = hdf5_dataset.global_log_std
+        
         # Calculate number of full batches
         self.num_full_batches = self.total_samples // batch_size
         self.has_remainder = (self.total_samples % batch_size) != 0
@@ -326,6 +334,16 @@ class BatchOptimizedHDF5Dataset(torch.utils.data.Dataset):
                 print(f"💡 HDF5 chunk size is {chunk_size_0}. Consider using batch_size={optimal_batch} for better alignment")
         else:
             print("⚠️  HDF5 dataset not chunked - batch loading may be less efficient")
+    
+    def __getstate__(self):
+        """Custom pickling for multiprocessing support."""
+        # The hdf5_dataset will handle its own pickling
+        return self.__dict__.copy()
+    
+    def __setstate__(self, state):
+        """Custom unpickling for multiprocessing support."""
+        self.__dict__.update(state)
+        # The hdf5_dataset will reopen files as needed
         
     def __len__(self):
         return self.num_full_batches + (1 if self.has_remainder else 0)
@@ -343,30 +361,52 @@ class BatchOptimizedHDF5Dataset(torch.utils.data.Dataset):
             end_idx = start_idx + self.batch_size
             actual_batch_size = self.batch_size
         
+        # Handle multiprocessing: open HDF5 file directly if needed
+        if hasattr(self, 'h5_file') and self.h5_file is not None:
+            # Use cached file handle
+            arr = self.arr
+        else:
+            # Open file with optimized settings (for multiprocessing)
+            self.h5_file = h5py.File(
+                str(self.data_path), 'r',
+                rdcc_nbytes=1024*1024*64,  # 64MB chunk cache
+                rdcc_nslots=10007          # More cache slots
+            )
+            self.arr = self.h5_file['patterns']
+            arr = self.arr
+        
         # Batch load from HDF5 - much faster than individual loads
-        patterns = np.array(self.hdf5_dataset.arr[start_idx:end_idx])
+        patterns = np.array(arr[start_idx:end_idx])
         
         # Convert to tensor and apply all transformations in batch
         x = torch.from_numpy(patterns).float()
         
         # Apply dequantization (vectorized, optimized for batches)
-        dtype = self.hdf5_dataset.metadata["dtype"]
+        dtype = self.metadata["dtype"]
         if dtype == "uint16":
-            x = x * (self.hdf5_dataset.metadata["data_range"] / 65535.0) + self.hdf5_dataset.metadata["data_min"]
+            x = x * (self.metadata["data_range"] / 65535.0) + self.metadata["data_min"]
         # elif dtype == "float16" -> already correct as float32
         
         # Apply log transform (vectorized)
         x = torch.log(x + 1)
         
         # Apply normalization if enabled (vectorized)
-        if self.hdf5_dataset.use_normalization:
-            x = (x - self.hdf5_dataset.global_log_mean) / (self.hdf5_dataset.global_log_std + 1e-8)
+        if self.use_normalization:
+            x = (x - self.global_log_mean) / (self.global_log_std + 1e-8)
         
         # Ensure channel dimension for all samples in batch
         if x.dim() == 3:  # [batch, height, width]
             x = x.unsqueeze(1)  # [batch, 1, height, width]
         
         return x
+    
+    def __del__(self):
+        """Clean up HDF5 file handle."""
+        try:
+            if hasattr(self, 'h5_file') and self.h5_file is not None:
+                self.h5_file.close()
+        except:
+            pass  # Ignore errors during cleanup
 
 def load_data(args) -> Tuple[torch.utils.data.DataLoader, Optional[np.ndarray], dict]:
     """Load data and return DataLoader, spatial coordinates, and metadata."""
@@ -479,10 +519,14 @@ def load_data(args) -> Tuple[torch.utils.data.DataLoader, Optional[np.ndarray], 
     import platform
     
     if isinstance(dataset, BatchOptimizedHDF5Dataset):
-        # Batch-optimized dataset: Use fewer workers since batching is more efficient
-        num_workers = min(args.num_workers, 2)  # Limit workers for batch loading
+        # Batch-optimized dataset: Use fewer workers since each "batch" loads many patterns
+        num_workers = min(args.num_workers, 2) if args.num_workers > 0 else 0
         if num_workers > 0:
-            print(f"Batch-optimized loading: Using {num_workers} workers (reduced from {args.num_workers} for efficiency)")
+            print(f"Batch-optimized loading: Using {num_workers} workers (reduced from {args.num_workers})")
+            print(f"  (Each batch loads {args.batch_size} patterns at once - already much more efficient)")
+        else:
+            print(f"Batch-optimized loading: Single-threaded mode")
+            print(f"  (Each batch loads {args.batch_size} patterns at once - much faster than individual loading)")
         
         dataloader_kwargs = {
             'batch_size': 1,  # Each dataset item is already a batch!
