@@ -10,7 +10,7 @@ A ResNet-based convolutional autoencoder for dimensionality reduction and analys
 - Regularized training with multiple loss components (MSE + L1 + contrastive + divergence) 
 - Sparse embedding layer with configurable latent dimensions
 - Mixed precision training support (bf16/float16)
-- Comprehensive test suite with 59+ tests for robustness
+- Comprehensive test suites with 150+ tests for robustness (59+ preprocessing, 95 training)
 - Advanced coordinate handling for irregular scan patterns
 
 ## Quick Start
@@ -70,8 +70,9 @@ python scripts/visualization/visualise_scan_latents.py \
 ├── models/                    # Neural network architectures
 ├── scripts/
 │   ├── preprocessing/         # Data conversion and preprocessing
-│   │   └── tests/            # Comprehensive test suite (59+ tests)
+│   │   └── tests/            # Comprehensive preprocessing test suite (59+ tests)
 │   ├── training/             # Model training scripts
+│   │   └── tests/            # Comprehensive training pipeline test suite (95 tests)
 │   └── visualization/        # Analysis and visualization tools
 ├── data/                     # Input data files
 └── outputs/                  # Generated results and checkpoints
@@ -121,10 +122,11 @@ L = Reconstruction + λ_lp·Lp_reg + λ_contrast·L_contrast + λ_div·L_div
 
 ## Testing
 
-Run the comprehensive test suite:
+The project includes comprehensive test suites for both preprocessing and training components:
 
+### Preprocessing Tests (59+ tests)
 ```bash
-# Run all tests
+# Run all preprocessing tests
 python scripts/preprocessing/tests/run_tests.py
 
 # Run only fast tests  
@@ -133,6 +135,33 @@ python scripts/preprocessing/tests/run_tests.py --fast
 # Run specific test groups
 python scripts/preprocessing/tests/run_tests.py --group downsample
 ```
+
+### Training Pipeline Tests (95 tests)
+```bash
+# Run all training tests
+pytest scripts/training/tests/
+
+# Run with verbose output
+pytest scripts/training/tests/ -v
+
+# Run only unit tests
+pytest scripts/training/tests/ -m unit
+
+# Run regularization-specific tests
+pytest scripts/training/tests/test_regularization* -v
+
+# Run with coverage report
+pytest scripts/training/tests/ --cov=scripts.training.train
+```
+
+**Training test coverage includes:**
+- Configuration validation and device detection
+- Dataset loading (HDF5 and tensor formats)
+- Model creation and compilation
+- Complete training pipeline orchestration
+- **Comprehensive regularization system testing** (all 5 types: Lp, contrastive, divergence, L2, KL)
+- Command-line interface parsing
+- Error handling and edge cases
 
 ## Requirements
 
