@@ -43,7 +43,7 @@ python scripts/training/train.py \
 ### 4. Generate Embeddings
 ```bash
 python scripts/visualization/generate_embeddings.py \
-    --input data/train_data.h5 \
+    --data data/train_data.h5 \
     --checkpoint outputs/ae_*_final.ckpt \
     --output outputs/embeddings.npz
 ```

@@ -20,7 +20,8 @@ sys.path.append(str(Path(__file__).parent.parent / "training"))
 from models.autoencoder import Autoencoder
 from models.losses import LossManager, create_loss_config_from_args
 from models.summary import calculate_metrics, calculate_diffraction_metrics
-from scripts.training.train import HDF5Dataset, LitAE
+from scripts.training.dataset import HDF5Dataset
+from scripts.training.lightning_model import LitAE
 import pytorch_lightning as pl
 
 def load_model_from_checkpoint(checkpoint_path: Path, device: str = "auto") -> Tuple[LitAE, Dict]:

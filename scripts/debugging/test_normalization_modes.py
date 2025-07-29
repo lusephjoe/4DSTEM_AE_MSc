@@ -12,7 +12,7 @@ def test_dataset_modes():
     print("=== TESTING NORMALIZATION MODES ===")
     
     # Import the dataset class
-    from scripts.training.train import HDF5Dataset
+    from scripts.training.dataset import HDF5Dataset
     
     data_path = "ds4_test_input_data/inputs/train_tensor_ds4_compressed.h5"
     
@@ -83,7 +83,7 @@ def test_dataset_modes():
     
     print("\n4. Testing model compatibility:")
     try:
-        from scripts.training.train import LitAE
+        from scripts.training.lightning_model import LitAE
         
         # Create minimal model for testing
         model = LitAE(latent_dim=32, lr=1e-4)

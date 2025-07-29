@@ -46,7 +46,8 @@ warnings.filterwarnings("ignore")
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
 from models.summary import show
-from scripts.training.train import LitAE, HDF5Dataset
+from scripts.training.lightning_model import LitAE
+from scripts.training.dataset import HDF5Dataset
 
 def parse_args():
     p = argparse.ArgumentParser(description="Generate embeddings from trained 4D-STEM autoencoder")

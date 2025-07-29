@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 sys.path.append(str(Path(__file__).parent.parent.parent))
 sys.path.append(str(Path(__file__).parent.parent / "training"))
 
-from scripts.training.train import HDF5Dataset
+from scripts.training.dataset import HDF5Dataset
 
 def analyze_raw_data(data_path: Path, num_samples: int = 1000):
     """Analyze raw HDF5 data before any processing."""

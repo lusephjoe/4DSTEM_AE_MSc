@@ -49,7 +49,7 @@ def debug_mse_calculation():
             checkpoint = torch.load(ckpt_files[0], map_location='cpu')
             
             # Import the model class
-            from scripts.training.train import LitAE
+            from scripts.training.lightning_model import LitAE
             from models.autoencoder import Autoencoder
             
             # Create model (you may need to adjust these parameters)
