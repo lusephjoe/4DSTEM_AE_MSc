@@ -144,6 +144,7 @@ python scripts/preprocessing/tests/run_tests.py --group downsample
 ## Citations & Acknowledgements
 This work and model was heavily inspired by / based on the following paper and the Python package m3_learning (https://github.com/m3-learning)
 
+```bibtex
 @article{Ludacka2024,
   title   = {Imaging and structure analysis of ferroelectric domains, domain walls, and vortices by scanning electron diffraction},
   author  = {Ludacka, Ursula and He, Jiali and Qin, Shuyu and Zahn, Manuel and Christiansen, Emil Frang and Hunnestad, Kasper A. and Zhang, Xinqiao and Yan, Zewu and Bourret, Edith and Kézsmárki, István and others},
@@ -154,6 +155,7 @@ This work and model was heavily inspired by / based on the following paper and t
   year    = {2024},
   doi     = {10.1038/s41524-024-01265-y}
 }
+``` 
 
 ## AI Disclosure Statement
 
