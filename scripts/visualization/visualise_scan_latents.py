@@ -97,44 +97,8 @@ def radial_mask(shape: tuple[int, int], r_min: float, r_max: float) -> np.ndarra
     return (r >= r_min) & (r < r_max)
 
 
-# Use STEMVisualizer for better compatibility and features
-try:
-    from .stem_visualization import STEMVisualizer
-    
-    def create_virtual_detector_image(data: np.ndarray, scan_shape: tuple, mode: str = "bf", **kwargs) -> np.ndarray:
-        """Create virtual detector image using STEMVisualizer."""
-        visualizer = STEMVisualizer(data, scan_shape=scan_shape)
-        
-        if mode == "bf":
-            radius = kwargs.get('bf_radius', 0.1)
-            pattern_size = min(data.shape[-2:])
-            actual_radius = int(radius * pattern_size // 2)
-            return visualizer.create_bright_field_image(radius=actual_radius)
-        elif mode == "df":
-            # Use default dark field region for now
-            return visualizer.create_virtual_field_image(visualizer.dark_field_region)
-        else:
-            raise ValueError(f"Unknown mode: {mode}")
-            
-except ImportError:
-    # Fallback to simple radial mask implementation
-    def create_virtual_detector_image(data: np.ndarray, scan_shape: tuple, mode: str = "bf", **kwargs) -> np.ndarray:
-        """Fallback virtual detector using simple radial masks."""
-        print("Warning: Using fallback virtual detector implementation")
-        
-        if mode == "bf":
-            radius = kwargs.get('bf_radius', 0.1)
-            mask = radial_mask(data.shape[-2:], 0.0, radius)
-        elif mode == "df":
-            r_inner = kwargs.get('df_inner', 0.2)
-            r_outer = kwargs.get('df_outer', 1.0)
-            mask = radial_mask(data.shape[-2:], r_inner, r_outer)
-        else:
-            raise ValueError(f"Unknown mode: {mode}")
-        
-        # Apply mask and reshape
-        virtual_image = np.sum(data * mask, axis=(-2, -1))
-        return virtual_image.reshape(scan_shape)
+# Virtual detector functionality is now handled directly by STEMVisualizer in main()
+# This eliminates the need for wrapper functions and import complexity
 
 
 # ───────────────────────────── CLI ─────────────────────────────
@@ -169,105 +133,133 @@ def main():
     Z = load_tensor(args.latents)        # (N, latent_dim)
     N = raw.shape[0]
 
-    # coordinates & mapping with automatic shape detection ------------------
-    def auto_detect_scan_shape(n_patterns):
-        """Automatically detect most likely scan shape from number of patterns."""
-        # Try perfect squares first
-        sqrt_n = int(np.sqrt(n_patterns))
-        if sqrt_n * sqrt_n == n_patterns:
-            return sqrt_n, sqrt_n
-        
-        # Try common rectangular ratios
-        for ratio in [1.0, 4/3, 3/2, 16/9, 2/1]:
-            for ny in range(1, int(np.sqrt(n_patterns * ratio)) + 1):
-                if n_patterns % ny == 0:
-                    nx = n_patterns // ny
-                    if abs(nx/ny - ratio) < 0.1:  # Close to desired ratio
-                        return ny, nx
-        
-        # Fall back to factorization
-        factors = []
-        for i in range(1, int(np.sqrt(n_patterns)) + 1):
-            if n_patterns % i == 0:
-                factors.append((i, n_patterns // i))
-        
-        # Choose factors closest to square
-        best_factors = min(factors, key=lambda x: abs(x[0] - x[1]))
-        return best_factors
+    # Import scan utilities and STEM visualization
+    import sys
+    from pathlib import Path
+    sys.path.append(str(Path(__file__).parent))
+    from scan_util import factorise_scan, coords_to_sparse_image, validate_coords, print_coord_summary
+    from stem_visualization import STEMVisualizer
     
-    # Priority 1: Use explicit --scan dimensions if provided
+    # Coordinate handling following FR-3.1, FR-3.2, FR-3.3
+    coords = None
+    Ny = Nx = None
+    
+    # Priority 1: Use explicit --scan dimensions if provided (FR-3.3)
     if args.scan is not None:
         Ny, Nx = args.scan
-        coords = np.stack(np.unravel_index(np.arange(N), (Ny, Nx)), axis=-1)
+        # Generate raster coordinates for explicit scan
+        from scan_util import raster_coords
+        coords = raster_coords(Ny, Nx)
         print(f"Using explicit scan dimensions: {Ny} x {Nx}")
         
     elif args.coords is not None:
         # Priority 2: Load coordinates from separate file
         if args.coords.suffix == ".npz":
             coord_data = np.load(args.coords)
-            if 'spatial_coordinates' in coord_data:
-                coords = coord_data['spatial_coordinates']
-            elif 'coords' in coord_data:
+            if 'coords' in coord_data:
                 coords = coord_data['coords']
+            elif 'spatial_coordinates' in coord_data:  # Legacy support
+                coords = coord_data['spatial_coordinates']
             else:
                 # Use first available array
                 keys = list(coord_data.keys())
                 coords = coord_data[keys[0]]
                 print(f"Warning: Using '{keys[0]}' as coordinates from .npz file")
         else:
-            coords = np.load(args.coords)    # (N,2) float32 (y,x)
+            coords = np.load(args.coords)    # (N,2) int32 (row,col)
         
-        # Validate coordinates against actual data size
-        if len(coords) != N:
-            print(f"Warning: Coordinate count ({len(coords)}) != pattern count ({N})")
-            print("Falling back to automatic shape detection")
-            Ny, Nx = auto_detect_scan_shape(N)
-            coords = np.stack(np.unravel_index(np.arange(N), (Ny, Nx)), axis=-1)
-        else:
-            Ny = int(coords[:, 0].max()) + 1
-            Nx = int(coords[:, 1].max()) + 1
-            
+        coords = np.array(coords, dtype=np.int32)
+        print_coord_summary(coords, "External coordinates")
+        
     elif args.latents.suffix == ".npz":
-        # Priority 3: Check if latents file contains spatial coordinates
+        # Priority 3: Check if latents file contains coordinates
         latent_data = np.load(args.latents)
-        if 'spatial_coordinates' in latent_data:
+        if 'coords' in latent_data:
+            coords = latent_data['coords']
+            print("✓ Using coordinates from latents file")
+        elif 'spatial_coordinates' in latent_data:  # Legacy support
             coords = latent_data['spatial_coordinates']
-            
-            # Validate coordinates against actual data size
-            if len(coords) != N:
-                print(f"Warning: Coordinate count ({len(coords)}) != pattern count ({N})")
-                print("Falling back to automatic shape detection")
-                Ny, Nx = auto_detect_scan_shape(N)
-                coords = np.stack(np.unravel_index(np.arange(N), (Ny, Nx)), axis=-1)
-            else:
-                Ny = int(coords[:, 0].max()) + 1
-                Nx = int(coords[:, 1].max()) + 1
-                print("Using spatial coordinates from latents .npz file")
-        else:
-            # Priority 4: Auto-detect scan dimensions
-            print(f"Auto-detecting scan shape for {N} patterns...")
-            Ny, Nx = auto_detect_scan_shape(N)
-            print(f"Detected scan shape: {Ny} x {Nx}")
-            coords = np.stack(np.unravel_index(np.arange(N), (Ny, Nx)), axis=-1)
-    else:
-        # Priority 4: Auto-detect scan dimensions
-        print(f"Auto-detecting scan shape for {N} patterns...")
-        Ny, Nx = auto_detect_scan_shape(N)
-        print(f"Detected scan shape: {Ny} x {Nx}")
-        coords = np.stack(np.unravel_index(np.arange(N), (Ny, Nx)), axis=-1)
+            print("⚠️ Using legacy spatial_coordinates from latents file")
+        
+        if coords is not None:
+            coords = np.array(coords, dtype=np.int32)
+            print_coord_summary(coords, "Latents file coordinates")
     
-    print(f"Final scan dimensions: {Ny} x {Nx} = {Ny*Nx} (data has {N} patterns)")
+    # If no coordinates found, fall back to factorization
+    if coords is None:
+        print(f"No coordinates found, auto-detecting scan shape for {N} patterns...")
+        try:
+            Ny, Nx = factorise_scan(N)
+            print(f"Auto-detected scan shape: {Ny} x {Nx}")
+            from scan_util import raster_coords
+            coords = raster_coords(Ny, Nx)
+        except Exception as e:
+            print(f"ERROR: Could not determine scan shape: {e}")
+            return
+    
+    # Validate coordinates
+    if len(coords) != N:
+        print(f"ERROR: Coordinate count ({len(coords)}) != pattern count ({N})")
+        return
+    
+    # Get scan dimensions from coordinates
+    coord_info = validate_coords(coords)
+    Ny, Nx = coord_info['inferred_shape']
+    
+    print(f"\nFinal configuration:")
+    print(f"  Scan dimensions: {Ny} x {Nx}")
+    print(f"  Patterns: {N}")
+    print(f"  Coordinate type: {coord_info['scan_type']}")
+    print(f"  Grid completeness: {coord_info['completeness']:.1%}")
+    
+    if not coord_info['is_complete_grid']:
+        print(f"  ⚠️ Using sparse mapping (some positions may be empty)")
 
     # 2. Build background images ---------------------------------------------
     # raw-average (mean over diffraction pattern)
-    raw_mean = raw.mean(axis=(2, 3)).reshape(Ny, Nx)
+    # Use sparse mapping instead of reshape (FR-3.1)
+    raw_mean_values = raw.mean(axis=(2, 3))
+    raw_mean = coords_to_sparse_image(coords, raw_mean_values, (Ny, Nx))
 
-    # virtual detector --------------------------------------------------------
-    # Use unified virtual detector function
-    virt_map = create_virtual_detector_image(
-        raw[:, 0], (Ny, Nx), mode=args.virtual,
-        bf_radius=args.bf_radius, df_inner=args.df_inner, df_outer=args.df_outer
-    )
+    # virtual detector using STEMVisualizer (proper implementation) --------
+    # Create STEMVisualizer instance
+    stem_viz = STEMVisualizer(raw[:, 0], scan_shape=(Ny, Nx))
+    print(f"Direct beam detected at: {stem_viz.direct_beam_position} (y, x)")
+    
+    # Generate virtual detector image
+    if args.virtual == "bf":
+        # Calculate appropriate radius in pixels from fractional radius
+        pattern_size = min(raw.shape[-2:])
+        radius_pixels = int(args.bf_radius * pattern_size // 2)
+        virt_image_full = stem_viz.create_bright_field_image(radius=radius_pixels)
+        print(f"Bright field radius: {radius_pixels} pixels ({args.bf_radius:.2f} fraction)")
+    elif args.virtual == "df":
+        # Create custom dark field region based on parameters
+        center_y, center_x = stem_viz.direct_beam_position
+        pattern_size = min(raw.shape[-2:])
+        
+        # Convert fractional radii to pixel radii
+        inner_radius = int(args.df_inner * pattern_size // 2)
+        outer_radius = int(args.df_outer * pattern_size // 2)
+        
+        # Create annular region
+        df_region = (
+            max(0, center_y - outer_radius),
+            min(raw.shape[-2], center_y + outer_radius),
+            max(0, center_x - outer_radius), 
+            min(raw.shape[-1], center_x + outer_radius)
+        )
+        
+        virt_image_full = stem_viz.create_virtual_field_image(df_region)
+        print(f"Dark field region: {df_region} (inner: {inner_radius}px, outer: {outer_radius}px)")
+    
+    # Convert full grid image to sparse mapping if needed
+    if coord_info['is_complete_grid']:
+        virt_map = virt_image_full
+    else:
+        # For irregular coordinates, we need to extract values and map sparsely
+        virt_values = virt_image_full.ravel()
+        virt_map = coords_to_sparse_image(coords, virt_values, (Ny, Nx))
 
     # 3. Plot mosaic ----------------------------------------------------------
     latent_dim = Z.shape[1]
@@ -281,12 +273,12 @@ def main():
                              sharex=True, sharey=True)
     axes = axes.ravel()
 
-    # Panel 0: raw-average
+    # Panel 0: raw-average (FR-3.2: handle NaN for sparse scans)
     axes[0].imshow(raw_mean, cmap="gray")
     axes[0].set_title("Raw average")
     axes[0].axis("off")
 
-    # Panel 1: virtual detector
+    # Panel 1: virtual detector (FR-3.2: handle NaN for sparse scans)
     axes[1].imshow(virt_map, cmap="gray")
     axes[1].set_title(f"Virtual {args.virtual.upper()}")
     axes[1].axis("off")

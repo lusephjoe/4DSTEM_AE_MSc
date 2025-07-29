@@ -299,17 +299,52 @@ def load_data(args) -> Tuple[torch.utils.data.DataLoader, Optional[np.ndarray], 
         use_normalization = not args.no_normalization
         dataset = HDF5Dataset(args.data, use_normalization=use_normalization)
         
-        # Generate spatial coordinates if requested
+        # Handle spatial coordinates following FR-2.1, FR-2.2, FR-2.3
         spatial_coords = None
         if args.save_spatial_coords:
             total_patterns = len(dataset)
-            scan_size = int(np.sqrt(total_patterns))
-            spatial_coords = []
-            for idx in range(total_patterns):
-                y = idx // scan_size
-                x = idx % scan_size
-                spatial_coords.append([x, y])
-            spatial_coords = np.array(spatial_coords)
+            
+            # FR-2.1: Try to get coordinates from HDF5 metadata first
+            try:
+                with h5py.File(args.data, 'r') as f:
+                    if 'metadata/scan_indices' in f:
+                        spatial_coords = f['metadata/scan_indices'][:]
+                        print(f"✓ Using ground-truth coordinates from HDF5: {spatial_coords.shape}")
+                    elif 'metadata/scan_coords_um' in f:
+                        # Convert physical coordinates to indices (simplified)
+                        coords_um = f['metadata/scan_coords_um'][:]
+                        # This would need proper scaling - for now, treat as indices
+                        spatial_coords = coords_um.astype(np.int32)
+                        print(f"✓ Using physical coordinates from HDF5: {spatial_coords.shape}")
+            except Exception as e:
+                print(f"Could not read HDF5 metadata: {e}")
+            
+            # FR-2.2: If no metadata, derive coordinates using scan utilities
+            if spatial_coords is None:
+                # Import scan utilities
+                import sys
+                from pathlib import Path
+                sys.path.append(str(Path(__file__).parent))
+                from scan_util import raster_coords, factorise_scan
+                
+                print(f"No scan metadata found, auto-detecting from {total_patterns} patterns...")
+                try:
+                    Ny, Nx = factorise_scan(total_patterns)
+                    print(f"Auto-detected scan shape: {Ny} x {Nx}")
+                    spatial_coords = raster_coords(Ny, Nx)
+                except Exception as e:
+                    print(f"ERROR: Could not determine scan coordinates: {e}")
+                    print("Coordinate generation failed - embeddings will be saved without spatial coordinates")
+                    spatial_coords = None
+            
+            # Validate that we have the right number of coordinates
+            if spatial_coords is not None:
+                if len(spatial_coords) != total_patterns:
+                    print(f"ERROR: Coordinate count ({len(spatial_coords)}) != pattern count ({total_patterns})")
+                    spatial_coords = None
+                else:
+                    # Ensure correct format and save as 'coords' key per FR-2.1
+                    spatial_coords = np.array(spatial_coords, dtype=np.int32)
         
         # Sample subset if requested
         if args.n_samples and args.n_samples < len(dataset):
@@ -461,7 +496,7 @@ def save_embeddings(embeddings: torch.Tensor, output_path: Path,
         # NumPy format (recommended for UMAP analysis)
         save_dict = {'embeddings': embeddings.numpy()}
         if spatial_coords is not None:
-            save_dict['spatial_coordinates'] = spatial_coords
+            save_dict['coords'] = spatial_coords  # FR-2.1: Use 'coords' key
         if metadata is not None:
             # Save metadata as JSON string in npz
             save_dict['metadata'] = np.array([json.dumps(metadata)])
