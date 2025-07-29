@@ -302,12 +302,16 @@ def main():
     for ax in axes[n_cols + latent_dim:]:
         ax.axis("off")
 
-    # single colourbar for latent panels
-    cbar = fig.colorbar(sc, ax=axes[n_cols:], fraction=0.02, pad=0.02)
-    cbar.set_label("normalised value", rotation=270, labelpad=15)
-
-    plt.tight_layout()
-    plt.savefig(args.outfig, dpi=args.dpi)
+    # Apply tight_layout with padding for colorbar
+    plt.tight_layout(rect=[0, 0, 0.9, 1])  # Leave space on right for colorbar
+    
+    # Add single colourbar for latent panels with proper positioning
+    # Use fig.add_axes to manually position colorbar to avoid tight_layout conflicts
+    cbar_ax = fig.add_axes([0.91, 0.15, 0.02, 0.7])  # [left, bottom, width, height]
+    cbar = fig.colorbar(sc, cax=cbar_ax)
+    cbar.set_label("Normalized value", rotation=270, labelpad=20)
+    
+    plt.savefig(args.outfig, dpi=args.dpi, bbox_inches='tight')
     print("Saved", args.outfig)
 
 
