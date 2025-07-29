@@ -55,6 +55,8 @@ python scripts/visualization/visualise_scan_latents.py \
     --scan 194 209
 ```
 
+![reconstruction visualisation (4x downsampled from original to 256x256)](readme_resources/reconstruction_verification.png "Reconstruction Visualization Example")
+
 ## Model Performance
 
 - Latent dimension: Configurable (32, 64, 128, 256...)
