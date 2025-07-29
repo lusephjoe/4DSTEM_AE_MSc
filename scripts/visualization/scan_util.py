@@ -115,6 +115,9 @@ def coords_to_sparse_image(coords: np.ndarray, values: np.ndarray,
     valid_coords = coords[valid_mask]
     valid_values = values[valid_mask]
     
+    # Ensure values are 1D (squeeze any extra dimensions)
+    valid_values = np.squeeze(valid_values)
+    
     image[valid_coords[:, 0], valid_coords[:, 1]] = valid_values
     
     return image

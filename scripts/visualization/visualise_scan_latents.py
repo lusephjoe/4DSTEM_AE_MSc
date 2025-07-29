@@ -218,7 +218,7 @@ def main():
     # 2. Build background images ---------------------------------------------
     # raw-average (mean over diffraction pattern)
     # Use sparse mapping instead of reshape (FR-3.1)
-    raw_mean_values = raw.mean(axis=(2, 3))
+    raw_mean_values = raw.mean(axis=(2, 3)).squeeze() # Remove channel dimension
     raw_mean = coords_to_sparse_image(coords, raw_mean_values, (Ny, Nx))
 
     # virtual detector using STEMVisualizer (proper implementation) --------
