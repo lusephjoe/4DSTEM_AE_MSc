@@ -717,7 +717,9 @@ def main():
     if args.auto_batch_size and device.type == "cuda":
         # Get sample for batch size optimization
         sample_batch = next(iter(loader))
-        if isinstance(sample_batch, (list, tuple)):
+        if isinstance(loader.dataset, BatchOptimizedHDF5Dataset):
+            sample_input = sample_batch.squeeze(0)[:1]  # Single sample from batch-optimized
+        elif isinstance(sample_batch, (list, tuple)):
             sample_input = sample_batch[0][:1]  # Single sample
         else:
             sample_input = sample_batch[:1]
@@ -738,7 +740,9 @@ def main():
     elif device.type == "cuda" and args.optimize_memory:
         # Get a sample to estimate memory usage
         sample_batch = next(iter(loader))
-        if isinstance(sample_batch, (list, tuple)):
+        if isinstance(loader.dataset, BatchOptimizedHDF5Dataset):
+            sample_batch = sample_batch.squeeze(0)
+        elif isinstance(sample_batch, (list, tuple)):
             sample_batch = sample_batch[0]
         
         available_memory = torch.cuda.get_device_properties(device).total_memory
@@ -776,7 +780,10 @@ def main():
 
     # Display model summary
     sample_batch = next(iter(loader))
-    if isinstance(sample_batch, (list, tuple)):
+    if isinstance(loader.dataset, BatchOptimizedHDF5Dataset):
+        # Batch-optimized: squeeze extra dimension and take first sample
+        example = sample_batch.squeeze(0)[:1].to(device)
+    elif isinstance(sample_batch, (list, tuple)):
         example = sample_batch[0][:1].to(device)
     else:
         example = sample_batch[:1].to(device)
@@ -880,9 +887,10 @@ def main():
                 # Handle batch format for both optimized and regular datasets
                 if isinstance(loader.dataset, BatchOptimizedHDF5Dataset):
                     # Batch-optimized dataset returns pre-batched tensors directly
-                    batch = batch_data
+                    # DataLoader adds an extra dimension, so squeeze it out
+                    batch = batch_data.squeeze(0)  # Remove the DataLoader batch dimension
                     if args.debug and batch_idx == 0:
-                        print(f"  Batch-optimized shape: {batch.shape}")
+                        print(f"  Batch-optimized shape (after squeeze): {batch.shape}")
                 else:
                     # Regular dataset format
                     if isinstance(batch_data, (list, tuple)):
