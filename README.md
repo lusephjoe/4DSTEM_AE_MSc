@@ -141,8 +141,13 @@ python scripts/preprocessing/tests/run_tests.py --group downsample
 - matplotlib, numpy, h5py, tqdm
 - hyperspy (for .dm4 file loading)
 
-## Citation
+## Citations & Acknowledgements
+This work was heavily inspired and the model based on the following paper and the Python package m3_learning (https://github.com/m3-learning)
 
 ```bibtex
-[TBD]
+@article{Ludacka_He_Qin_Zahn_Christiansen_Hunnestad_Zhang_Yan_Bourret_Kézsmárki_et al._2024, title={Imaging and structure analysis of ferroelectric domains, domain walls, and vortices by scanning electron diffraction}, volume={10}, DOI={10.1038/s41524-024-01265-y}, number={1}, journal={npj Computational Materials}, author={Ludacka, Ursula and He, Jiali and Qin, Shuyu and Zahn, Manuel and Christiansen, Emil Frang and Hunnestad, Kasper A. and Zhang, Xinqiao and Yan, Zewu and Bourret, Edith and Kézsmárki, István and et al.}, year={2024}, month={May}} 
 ```
+
+## AI Disclosure Statement
+
+Claude Code Assistant was used in the development of this project.
