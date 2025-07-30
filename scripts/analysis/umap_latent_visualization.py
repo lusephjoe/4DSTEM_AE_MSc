@@ -234,6 +234,8 @@ class LatentSpaceAnalyzer:
         if cluster_labels is not None:
             unique_labels = np.unique(cluster_labels)
             colors = plt.cm.Set1(np.linspace(0, 1, len(unique_labels)))
+            valid_cluster_labels = [label for label in unique_labels if label != -1]
+            n_valid_clusters = len(valid_cluster_labels)
             
             for label, color in zip(unique_labels, colors):
                 mask = cluster_labels == label
@@ -243,10 +245,23 @@ class LatentSpaceAnalyzer:
                              c='gray', s=1, alpha=0.3, label='Noise')
                 else:
                     ax.scatter(umap_embedding[mask, 0], umap_embedding[mask, 1], 
-                             c=[color], s=2, alpha=0.7, label=f'Cluster {label}')
+                             c=[color], s=2, alpha=0.7, label=f'C{label}')
             
             ax.set_title('UMAP with Clustering')
-            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+            
+            # Smart legend handling based on number of clusters
+            if n_valid_clusters <= 8:
+                ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=7, 
+                         markerscale=0.8, handletextpad=0.1)
+            elif n_valid_clusters <= 15:
+                ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=6, 
+                         markerscale=0.6, handletextpad=0.1, ncol=2, columnspacing=0.5)
+            else:
+                # Too many clusters - show summary text instead
+                ax.text(0.98, 0.98, f'{n_valid_clusters} clusters\n(legend omitted)', 
+                       transform=ax.transAxes, ha='right', va='top', 
+                       bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8),
+                       fontsize=8)
         else:
             ax.scatter(umap_embedding[:, 0], umap_embedding[:, 1], 
                       c='steelblue', s=1, alpha=0.6)
@@ -308,18 +323,28 @@ class LatentSpaceAnalyzer:
             
             # Plot cluster sizes
             ax = axes[0, 0]
-            cluster_sizes = [np.sum(cluster_labels == label) for label in unique_labels if label != -1]
-            cluster_names = [f'Cluster {label}' for label in unique_labels if label != -1]
+            valid_labels = [label for label in unique_labels if label != -1]
+            cluster_sizes = [np.sum(cluster_labels == label) for label in valid_labels]
+            cluster_names = [f'Cluster {label}' for label in valid_labels]
             
             bars = ax.bar(cluster_names, cluster_sizes, alpha=0.7)
             ax.set_title('Cluster Sizes')
             ax.set_ylabel('Number of Points')
             ax.tick_params(axis='x', rotation=45)
             
-            # Add value labels on bars
-            for bar, size in zip(bars, cluster_sizes):
-                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(cluster_sizes)*0.01,
-                       str(size), ha='center', va='bottom')
+            # Only label the top 10% of clusters by size to avoid overlap
+            if len(cluster_sizes) > 0:
+                # Calculate threshold for top 10% (minimum 1 cluster)
+                n_top_clusters = max(1, int(np.ceil(len(cluster_sizes) * 0.1)))
+                # Get indices of top clusters by size
+                top_indices = np.argsort(cluster_sizes)[-n_top_clusters:]
+                
+                for i, (bar, size, label) in enumerate(zip(bars, cluster_sizes, valid_labels)):
+                    if i in top_indices:
+                        # Only label the largest clusters
+                        ax.text(bar.get_x() + bar.get_width()/2, 
+                               bar.get_height() + max(cluster_sizes)*0.01,
+                               f'C{label}', ha='center', va='bottom', fontweight='bold')
             
             # Plot cluster separation (silhouette analysis)
             ax = axes[0, 1]
@@ -356,25 +381,42 @@ class LatentSpaceAnalyzer:
             
             # Plot cluster centers and boundaries
             ax = axes[1, 0]
-            for label in unique_labels:
-                if label == -1:
-                    continue
+            valid_cluster_labels = [label for label in unique_labels if label != -1]
+            n_valid_clusters = len(valid_cluster_labels)
+            
+            for label in valid_cluster_labels:
                 mask = cluster_labels == label
                 cluster_points = umap_embedding[mask]
                 
                 # Plot cluster points
                 ax.scatter(cluster_points[:, 0], cluster_points[:, 1], 
-                          alpha=0.6, s=2, label=f'Cluster {label}')
+                          alpha=0.6, s=2, label=f'C{label}')
                 
-                # Plot cluster center
+                # Plot cluster center with smaller crosses
                 center = np.mean(cluster_points, axis=0)
-                ax.scatter(center[0], center[1], marker='x', s=100, 
-                          color='black', linewidth=3)
+                ax.scatter(center[0], center[1], marker='x', s=30, 
+                          color='black', linewidth=2)
             
             ax.set_title('Cluster Centers and Boundaries')
             ax.set_xlabel('UMAP 1')
             ax.set_ylabel('UMAP 2')
-            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+            
+            # Improve legend handling based on number of clusters
+            if n_valid_clusters <= 10:
+                # For few clusters, use normal legend
+                ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=7, 
+                         markerscale=0.8, handletextpad=0.1)
+            elif n_valid_clusters <= 20:
+                # For medium number of clusters, use smaller legend with two columns
+                ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=6, 
+                         markerscale=0.6, handletextpad=0.1, ncol=2, columnspacing=0.5)
+            else:
+                # For many clusters, no legend (too cluttered)
+                ax.text(0.98, 0.98, f'{n_valid_clusters} clusters\n(legend omitted)', 
+                       transform=ax.transAxes, ha='right', va='top', 
+                       bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8),
+                       fontsize=8)
+            
             ax.grid(True, alpha=0.3)
             
             # Plot distance matrix between clusters
