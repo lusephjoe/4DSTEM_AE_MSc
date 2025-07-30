@@ -191,7 +191,8 @@ class LatentSpaceAnalyzer:
     
     def create_visualizations(self, umap_embedding: np.ndarray, 
                             cluster_labels: Optional[np.ndarray] = None,
-                            output_dir: Path = Path("umap_analysis")) -> None:
+                            output_dir: Path = Path("umap_analysis"),
+                            create_parameter_analysis: bool = False) -> None:
         """Create comprehensive UMAP visualizations."""
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -304,8 +305,9 @@ class LatentSpaceAnalyzer:
         if cluster_labels is not None:
             self._create_cluster_analysis_plots(umap_embedding, cluster_labels, output_dir)
         
-        # 3. Parameter sensitivity analysis
-        self._create_parameter_analysis(output_dir)
+        # 3. Parameter sensitivity analysis (optional)
+        if create_parameter_analysis:
+            self._create_parameter_analysis(output_dir)
         
         print(f"✓ Visualizations saved to: {output_dir}")
     
@@ -572,6 +574,8 @@ def main():
                        help="Randomly subsample N embeddings for faster analysis")
     parser.add_argument("--standardize", action="store_true",
                        help="Standardize embeddings before UMAP")
+    parser.add_argument("--parameter_analysis", action="store_true",
+                       help="Create parameter sensitivity analysis (slow)")
     parser.add_argument("--random_state", type=int, default=42,
                        help="Random seed for reproducibility")
     
@@ -637,7 +641,8 @@ def main():
             )
     
     # Create visualizations
-    analyzer.create_visualizations(umap_embedding, cluster_labels, args.output_dir)
+    analyzer.create_visualizations(umap_embedding, cluster_labels, args.output_dir, 
+                                 create_parameter_analysis=args.parameter_analysis)
     
     # Save results
     result_metadata = {
