@@ -325,12 +325,14 @@ class LatentSpaceAnalyzer:
             ax = axes[0, 0]
             valid_labels = [label for label in unique_labels if label != -1]
             cluster_sizes = [np.sum(cluster_labels == label) for label in valid_labels]
-            cluster_names = [f'Cluster {label}' for label in valid_labels]
             
-            bars = ax.bar(cluster_names, cluster_sizes, alpha=0.7)
+            bars = ax.bar(range(len(cluster_sizes)), cluster_sizes, alpha=0.7)
             ax.set_title('Cluster Sizes')
             ax.set_ylabel('Number of Points')
-            ax.tick_params(axis='x', rotation=45)
+            ax.set_xlabel('Clusters (ordered by label)')
+            
+            # Remove x-axis labels as requested
+            ax.set_xticks([])
             
             # Only label the top 10% of clusters by size to avoid overlap
             if len(cluster_sizes) > 0:
@@ -354,29 +356,32 @@ class LatentSpaceAnalyzer:
                 sample_silhouette_values = silhouette_samples(umap_embedding, cluster_labels)
                 
                 y_lower = 10
-                for i, label in enumerate(unique_labels):
-                    if label == -1:
-                        continue
-                    
+                valid_labels_for_silhouette = [label for label in unique_labels if label != -1]
+                
+                for i, label in enumerate(valid_labels_for_silhouette):
                     cluster_silhouette_values = sample_silhouette_values[cluster_labels == label]
                     cluster_silhouette_values.sort()
                     
                     size_cluster_i = cluster_silhouette_values.shape[0]
                     y_upper = y_lower + size_cluster_i
                     
-                    color = plt.cm.Set1(i / len(unique_labels))
+                    color = plt.cm.Set1(i / len(valid_labels_for_silhouette))
                     ax.fill_betweenx(np.arange(y_lower, y_upper),
                                     0, cluster_silhouette_values,
                                     facecolor=color, edgecolor=color, alpha=0.7)
                     
-                    ax.text(-0.05, y_lower + 0.5 * size_cluster_i, str(label))
+                    # Only label every 10th cluster to avoid clutter
+                    if i % 10 == 0 or i == len(valid_labels_for_silhouette) - 1:
+                        ax.text(-0.05, y_lower + 0.5 * size_cluster_i, str(label), 
+                               fontsize=8, ha='right', va='center')
+                    
                     y_lower = y_upper + 10
                 
                 ax.axvline(x=silhouette_avg, color="red", linestyle="--", 
                           label=f'Average Score: {silhouette_avg:.3f}')
                 ax.set_title('Silhouette Analysis')
                 ax.set_xlabel('Silhouette Coefficient Values')
-                ax.set_ylabel('Cluster Label')
+                ax.set_ylabel('Cluster Index (every 10th labeled)')
                 ax.legend()
             
             # Plot cluster centers and boundaries
@@ -384,13 +389,26 @@ class LatentSpaceAnalyzer:
             valid_cluster_labels = [label for label in unique_labels if label != -1]
             n_valid_clusters = len(valid_cluster_labels)
             
-            for label in valid_cluster_labels:
+            # Determine top 10% clusters by size for legend
+            valid_cluster_sizes = [np.sum(cluster_labels == label) for label in valid_cluster_labels]
+            n_top_clusters = max(1, int(np.ceil(len(valid_cluster_sizes) * 0.1)))
+            top_cluster_indices = np.argsort(valid_cluster_sizes)[-n_top_clusters:]
+            top_cluster_labels = [valid_cluster_labels[i] for i in top_cluster_indices]
+            
+            for i, label in enumerate(valid_cluster_labels):
                 mask = cluster_labels == label
                 cluster_points = umap_embedding[mask]
+                cluster_size = np.sum(mask)
+                
+                # Only add legend entry for top 10% clusters
+                if label in top_cluster_labels:
+                    legend_label = f'C{label} ({cluster_size} pts)'
+                else:
+                    legend_label = None
                 
                 # Plot cluster points
                 ax.scatter(cluster_points[:, 0], cluster_points[:, 1], 
-                          alpha=0.6, s=2, label=f'C{label}')
+                          alpha=0.6, s=2, label=legend_label)
                 
                 # Plot cluster center with smaller crosses
                 center = np.mean(cluster_points, axis=0)
@@ -401,21 +419,16 @@ class LatentSpaceAnalyzer:
             ax.set_xlabel('UMAP 1')
             ax.set_ylabel('UMAP 2')
             
-            # Improve legend handling based on number of clusters
-            if n_valid_clusters <= 10:
-                # For few clusters, use normal legend
-                ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=7, 
+            # Always show legend for top clusters, adjust formatting based on count
+            if n_top_clusters <= 5:
+                ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=8, 
                          markerscale=0.8, handletextpad=0.1)
-            elif n_valid_clusters <= 20:
-                # For medium number of clusters, use smaller legend with two columns
-                ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=6, 
-                         markerscale=0.6, handletextpad=0.1, ncol=2, columnspacing=0.5)
+            elif n_top_clusters <= 10:
+                ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=7, 
+                         markerscale=0.6, handletextpad=0.1)
             else:
-                # For many clusters, no legend (too cluttered)
-                ax.text(0.98, 0.98, f'{n_valid_clusters} clusters\n(legend omitted)', 
-                       transform=ax.transAxes, ha='right', va='top', 
-                       bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8),
-                       fontsize=8)
+                ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=6, 
+                         markerscale=0.5, handletextpad=0.1, ncol=2, columnspacing=0.5)
             
             ax.grid(True, alpha=0.3)
             
