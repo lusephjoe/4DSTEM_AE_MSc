@@ -5,7 +5,6 @@ Refactored 4D-STEM Autoencoder Training Script
 A clean, extensible training pipeline for 4D-STEM autoencoder models with 
 object-oriented design and comprehensive configuration management.
 """
-from __future__ import annotations
 
 import argparse
 import logging

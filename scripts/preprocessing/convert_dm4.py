@@ -13,7 +13,6 @@ Features:
 - Memory-efficient streaming processing with HDF5 compression
 - Preserves raw intensity values (normalization handled by training)
 """
-from __future__ import annotations
 import argparse
 import json
 from pathlib import Path

@@ -16,7 +16,6 @@ Author: Claude Code Assistant
 Date: 2025-01-18
 """
 
-from __future__ import annotations
 import numpy as np
 import torch
 from typing import Tuple, Optional, Dict, Any
