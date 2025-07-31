@@ -97,19 +97,29 @@ python scripts/visualization/visualise_scan_latents.py \
 
 ```
 Input (any size) → Encoder → Configurable Latent → Decoder → Reconstruction
-                      ↓
-              Initial Conv Layers (64→128 channels)
+
+Encoder:
+Input (1 channel) → Conv (1→64) → Conv (64→128)
                       ↓  
-              3 ResNet Blocks (4x pooling each: 64x→16x→4x)
+              3 ResNet Blocks (4x pooling each)
+              - ConvBlock (3 conv layers with skip connection)
+              - IdentityBlock (1 conv layer)
+              - Adaptive pooling (4x reduction)
                       ↓
-              Final Conv Layers (128→64→1 channels)
+              Final Conv Layers (128→64→1)
                       ↓
-              Adaptive Pool (4x4) + Embedding (ReLU)
+              Adaptive Pool (4x4) + Linear Embedding (ReLU)
+
+Decoder:
+Latent → Linear (latent_dim → 2048) → Reshape (128×4×4)
                       ↓
-              Adaptive Decoder (variable output size)
+              3 ResNet Upsampling Blocks (4x upsampling each)
+              - 4×4 → 16×16 → 64×64 → 256×256
+                      ↓
+              Final Conv (128→1) + Interpolation to target size
 ```
 
-Key features: Adaptive pooling for variable input sizes, conditional batch normalization, skip connections, fixed parameter count across resolutions.
+Key features: Adaptive pooling for size-agnostic processing, conditional batch normalization, ResNet skip connections, fixed parameter count across input resolutions.
 
 ## Loss Function
 
