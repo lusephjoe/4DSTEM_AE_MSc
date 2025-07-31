@@ -1,196 +1,121 @@
 # 4D-STEM Autoencoder Scripts
 
-This directory contains organized scripts for training, preprocessing, and visualizing 4D-STEM autoencoders.
+Complete pipeline for training, analysis, and visualization of 4D-STEM autoencoders.
 
 ## Directory Structure
 
 ```
 scripts/
-├── training/           # Training scripts and datasets
-│   ├── train.py                 # Traditional tensor-based training
-│   ├── train_hyperspy.py        # HyperSpy-based efficient training
-│   ├── hyperspy_dataset.py      # PyTorch datasets for HyperSpy
+├── training/           # Model training and configuration
+│   ├── train.py                 # Main training script
+│   ├── dataset.py               # HDF5 dataset implementation
+│   ├── lightning_model.py       # PyTorch Lightning model wrapper
 │   └── README.md               # Training documentation
 ├── preprocessing/      # Data conversion and preprocessing
-│   ├── convert_dm4_to_hspy.py  # dm4 → hspy conversion (recommended)
-│   ├── preprocess.py           # Traditional preprocessing to tensors
-│   ├── convert_dm4.py          # Most Complete Conversion script
+│   ├── convert_dm4_to_hspy.py  # dm4 to hspy conversion
+│   ├── preprocess.py           # Traditional preprocessing
 │   └── README.md               # Preprocessing documentation
-├── visualization/      # Model evaluation and visualization
-│   ├── evaluate_autoencoder.py # Comprehensive model evaluation
+├── visualization/      # Model evaluation and embedding generation
+│   ├── evaluate_autoencoder.py # Model evaluation
 │   ├── generate_embeddings.py  # Extract latent embeddings
 │   ├── reconstruct.py          # Generate reconstructions
-│   ├── stem_visualization.py   # STEM-specific visualization tools
-│   ├── visualise_scan_latents.py # Spatial latent analysis
 │   └── README.md               # Visualization documentation
+├── analysis/          # Advanced analysis and clustering
+│   ├── dimension_reduction.py   # UMAP/PCA dimension reduction
+│   ├── clustering_analysis.py   # Comprehensive clustering analysis
+│   ├── optimize_clustering.py   # Parameter optimization
+│   └── umap_latent_visualization.py # Legacy UMAP visualization
 └── README.md          # This file
 ```
 
 ## Quick Start
 
-### Recommended Workflow (Fast & Memory-Efficient)
+### Complete Analysis Pipeline
 
 ```bash
-# 1. Convert dm4 to hspy (one-time, fast)
+# 1. Data preprocessing
 cd preprocessing/
-python convert_dm4_to_hspy.py --input ../data/sample.dm4 --output ../data/sample.hspy
+python convert_dm4.py --input ../data/sample.dm4 --output ../data/sample.h5
 
-# 2. Train with efficient lazy loading
+# 2. Model training
 cd ../training/
-python train_hyperspy.py --data ../data/sample.hspy --output_dir ../outputs --use_chunked
+python train.py --data ../data/sample.h5 --output_dir ../outputs --epochs 50
 
-# 3. Evaluate and visualize results
+# 3. Generate embeddings
 cd ../visualization/
-python evaluate_autoencoder.py --model_path ../outputs/ae.ckpt --data_path ../data/sample.pt
-```
+python generate_embeddings.py --checkpoint ../outputs/ae_final.ckpt \
+    --data ../data/sample.h5 --output ../embeddings/latent_embeddings.npz
 
-### Traditional Workflow (For Small Datasets)
+# 4. Dimension reduction analysis
+cd ../analysis/
+python dimension_reduction.py --embeddings ../embeddings/latent_embeddings.npz \
+    --method umap --optimize_parameters --output_dir ../results/umap_analysis
 
-```bash
-# 1. Preprocess to tensor
-cd preprocessing/
-python preprocess.py --input ../data/sample.dm4 --output ../data/processed.pt
-
-# 2. Train
-cd ../training/
-python train.py --data ../data/processed.pt --output_dir ../outputs
-
-# 3. Visualize
-cd ../visualization/
-python evaluate_autoencoder.py --model_path ../outputs/ae.ckpt --data_path ../data/processed.pt
+# 5. Clustering analysis
+python clustering_analysis.py --latent_embeddings ../embeddings/latent_embeddings.npz \
+    --method all --compare_methods --standardize --output_dir ../results/clustering
 ```
 
 ## Key Features
 
-### 🚀 **High Performance**
-- **HyperSpy lazy loading**: 10-100x less memory usage
-- **CUDA optimizations**: Mixed precision, model compilation
-- **Chunked processing**: Handle datasets larger than RAM
-- **Memory monitoring**: Real-time memory usage tracking
+### Training
+- Professional PyTorch Lightning architecture with comprehensive regularization
+- HDF5 lazy loading for memory-efficient processing
+- Mixed precision training and model compilation support
+- Extensive configuration options and parameter validation
 
-### 📊 **Comprehensive Analysis**
-- **Multiple metrics**: PSNR, SSIM, MSE with confidence intervals
-- **Visualization tools**: Reconstructions, embeddings, latent space
-- **Statistical analysis**: Significance testing and error bars
-- **Publication-ready figures**: High-DPI exports in multiple formats
+### Analysis
+- Dimension reduction with UMAP/PCA and parameter optimization
+- Multiple clustering algorithms (HDBSCAN, K-means, DBSCAN, Gaussian Mixture)
+- High-dimensional and reduced embedding support
+- Comprehensive evaluation metrics and statistical analysis
 
-### 🔧 **Flexible Processing**
-- **Multiple file formats**: dm4, hdf5, hspy support
-- **Preprocessing options**: Downsampling, normalization, subsampling
-- **Configurable training**: Batch sizes, learning rates, regularization
-- **Easy experimentation**: Parameter sweeps and ablation studies
-
-## Performance Comparison
-
-| Method | Memory Usage | Processing Time | Scalability |
-|--------|-------------|----------------|-------------|
-| **HyperSpy workflow** | ~100MB | Minutes | Excellent |
-| **Traditional workflow** | Full dataset | Hours | Limited |
+### Visualization
+- Publication-ready figures with spatial mapping
+- Interactive reconstructions and embedding visualizations  
+- Automated parameter optimization plots
+- Clean, non-overlapping legends and annotations
 
 ## Usage Examples
 
-### Memory-Efficient Training
+### Training with Regularization
 ```bash
-# For large datasets (>5GB)
-python training/train_hyperspy.py --data data.hspy --output_dir outputs \
-    --use_chunked --chunk_size 32 --batch 16 --precision 16
+python training/train.py --data data.h5 --output_dir outputs --epochs 100 \
+    --batch 64 --latent 256 --lambda_act 1e-4 --lambda_l2 1e-6 --precision 16
 ```
 
-### High-Performance Training
+### Clustering Parameter Optimization
 ```bash
-# For CUDA systems with plenty of memory
-python training/train_hyperspy.py --data data.hspy --output_dir outputs \
-    --batch 64 --precision 16 --compile --persistent_workers
+python analysis/optimize_clustering.py --latent_embeddings embeddings.npz \
+    --standardize --max_clusters 20 --subsample 10000 --output_dir results
 ```
 
-### Preprocessing with Downsampling
+### Method Comparison
 ```bash
-# Reduce data size by 4x
-python preprocessing/convert_dm4_to_hspy.py --input data.dm4 --output data.hspy
-python training/train_hyperspy.py --data data.hspy --output_dir outputs \
-    --downsample 2 --scan_step 2
+python analysis/clustering_analysis.py --latent_embeddings embeddings.npz \
+    --method all --compare_methods --standardize --output_dir comparison
 ```
-
-### Comprehensive Evaluation
-```bash
-# Full evaluation pipeline
-python visualization/evaluate_autoencoder.py --model_path outputs/ae.ckpt --data_path data.pt
-python visualization/generate_embeddings.py --model_path outputs/ae.ckpt --data_path data.pt
-python visualization/reconstruct.py --model_path outputs/ae.ckpt --data_path data.pt
-```
-
-## File Size Guidelines
-
-| Dataset Size | Recommended Workflow | Settings |
-|-------------|---------------------|----------|
-| < 1 GB | Either workflow | Default settings |
-| 1-5 GB | HyperSpy workflow | `--use_chunked --chunk_size 64` |
-| 5-20 GB | HyperSpy workflow | `--use_chunked --chunk_size 32 --batch 16` |
-| > 20 GB | HyperSpy workflow | `--use_chunked --chunk_size 16 --batch 8` |
-
-## Migration Guide
-
-### From Old Preprocessing
-```bash
-# Old way (slow, memory-intensive)
-python preprocess.py --input data.dm4 --output processed.pt
-python train.py --data processed.pt --output_dir outputs
-
-# New way (fast, memory-efficient)
-python preprocessing/convert_dm4_to_hspy.py --input data.dm4 --output data.hspy
-python training/train_hyperspy.py --data data.hspy --output_dir outputs
-```
-
-### Benefits of Migration
-- **10x faster** preprocessing
-- **100x less memory** usage
-- **Flexible** parameter experimentation
-- **Reusable** converted files
 
 ## Dependencies
 
-### Core Dependencies
-- PyTorch >= 1.13
+### Required
+- PyTorch >= 1.13 
 - PyTorch Lightning >= 1.8
-- NumPy
-- tqdm
-
-### Optional Dependencies
-- HyperSpy (for .hspy support)
-- psutil (for memory monitoring)
-- Matplotlib (for visualization)
-- scikit-learn (for analysis)
+- NumPy, h5py, scikit-learn
+- matplotlib, seaborn
+- UMAP-learn, HDBSCAN
 
 ### Installation
 ```bash
-pip install torch torchvision pytorch-lightning
-pip install hyperspy psutil matplotlib scikit-learn seaborn
-```
+pip install -r "requirements.txt"
+# install your relevant GPU-accelerated Pytorch version
 
-## Common Issues
+## Documentation
 
-### Memory Problems
-- Use HyperSpy workflow for large datasets
-- Reduce batch size and chunk size
-- Enable `--precision 16` for mixed precision
+Each directory contains detailed documentation:
+- **training/README.md**: Training configuration and regularization
+- **preprocessing/README.md**: Data conversion workflows  
+- **visualization/README.md**: Model evaluation tools
+- **analysis/README.md**: Clustering and dimension reduction analysis
 
-### Slow Processing
-- Use `convert_dm4_to_hspy.py` instead of `preprocess.py`
-- Enable `--compile` for faster training
-- Use `--persistent_workers` for data loading
-
-### Import Errors
-- Ensure you're running scripts from their respective directories
-- Check that the `models/` directory is accessible from the project root
-
-## Getting Help
-
-Each directory contains detailed README files with specific usage instructions:
-- **training/README.md**: Training scripts and options
-- **preprocessing/README.md**: Data conversion and preprocessing
-- **visualization/README.md**: Evaluation and visualization tools
-
-For specific script help:
-```bash
-python script_name.py --help
-```
+For script-specific help: `python script_name.py --help`
