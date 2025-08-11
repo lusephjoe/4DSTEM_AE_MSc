@@ -21,6 +21,17 @@ import hyperspy.api as hs
 from matplotlib.widgets import RectangleSelector
 from scipy.ndimage import gaussian_filter
 
+# py4DSTEM imports
+try:
+    import py4DSTEM
+    from py4DSTEM.process.calibration.origin import get_origin_single_dp
+    from py4DSTEM.process.calibration.probe import get_probe_size
+    from py4DSTEM.datacube import DataCube
+    PY4DSTEM_AVAILABLE = True
+except ImportError:
+    PY4DSTEM_AVAILABLE = False
+    print("Warning: py4DSTEM not available. Using fallback implementations.")
+
 
 class STEMVisualizer:
     """Enhanced STEM data visualization with interactive capabilities."""
@@ -54,8 +65,13 @@ class STEMVisualizer:
             'units': 'nm'
         }
         
+        # Create py4DSTEM DataCube if available
+        self._py4dstem_datacube = None
+        if PY4DSTEM_AVAILABLE:
+            self._create_py4dstem_datacube()
+        
     def _prepare_data(self, data: Union[np.ndarray, torch.Tensor]) -> np.ndarray:
-        """Convert input data to numpy array with proper shape."""
+        """Convert input data to numpy array with proper shape and preprocess."""
         if isinstance(data, torch.Tensor):
             data = data.detach().cpu().numpy()
         
@@ -63,10 +79,54 @@ class STEMVisualizer:
         if data.ndim == 4:
             data = data.squeeze(1)  # Remove channel dimension
         
-        # Apply log transformation like m3_learning (handle negative values from reconstructions)
-        self.log_data = np.log(np.maximum(data, 0) + 1)
+        # Convert to float32 if needed for scipy compatibility
+        original_dtype = data.dtype
+        if data.dtype in [np.float16, np.int8, np.int16, np.uint8, np.uint16]:
+            print(f"Converting data from {original_dtype} to float32 for processing compatibility")
+            data = data.astype(np.float32)
+            self.original_dtype = original_dtype
+        else:
+            self.original_dtype = data.dtype
         
-        return data
+        # Enhanced preprocessing for better virtual imaging
+        # 1. Handle negative values from reconstructions
+        data_positive = np.maximum(data, 0)
+        
+        # 2. Remove extreme outliers (hot pixels) using percentile clipping
+        p99 = np.percentile(data_positive, 99.9)
+        data_clipped = np.minimum(data_positive, p99)
+        
+        # 3. Apply median filter to reduce hot pixel artifacts
+        from scipy.ndimage import median_filter
+        data_filtered = np.zeros_like(data_clipped)
+        for i in range(data_clipped.shape[0]):
+            data_filtered[i] = median_filter(data_clipped[i], size=3)
+        
+        # Store both raw and processed data
+        self.data_raw = data.copy()  # Keep original for fallback
+        self.log_data = np.log(data_filtered + 1)  # Log-transformed for visualization
+        
+        return data_filtered
+    
+    def _create_py4dstem_datacube(self):
+        """Create py4DSTEM DataCube from the data."""
+        try:
+            # Reshape data to match py4DSTEM expectations (R_Nx, R_Ny, Q_Nx, Q_Ny)
+            R_Nx, R_Ny = self.scan_shape
+            Q_Nx, Q_Ny = self.pattern_shape
+            
+            # Reshape from (N, H, W) to (R_Nx, R_Ny, Q_Nx, Q_Ny)
+            data_4d = self.data.reshape(R_Nx, R_Ny, Q_Nx, Q_Ny)
+            
+            # Create DataCube
+            self._py4dstem_datacube = DataCube(data=data_4d)
+            
+            # Initialize calibration
+            self._py4dstem_datacube.calibration = py4DSTEM.Calibration()
+            
+        except Exception as e:
+            print(f"Warning: Failed to create py4DSTEM DataCube: {e}")
+            self._py4dstem_datacube = None
     
     def _infer_scan_shape(self) -> Tuple[int, int]:
         """Infer scan shape from data dimensions."""
@@ -80,11 +140,26 @@ class STEMVisualizer:
         return min(factors, key=lambda x: abs(x[0] - x[1]))
     
     def _find_direct_beam_position(self) -> Tuple[int, int]:
-        """Find the direct beam position (brightest spot) following py4DSTEM approach."""
+        """Find the direct beam position using py4DSTEM if available, fallback to custom implementation."""
         # Calculate mean diffraction pattern for beam position detection
         # Use positive values only to handle reconstructed data with negatives
         mean_dp = np.mean(np.maximum(self.data, 0), axis=0)
         
+        if PY4DSTEM_AVAILABLE:
+            try:
+                # Use py4DSTEM's optimized origin finding
+                # First get probe size
+                r, _, _ = get_probe_size(mean_dp)
+                
+                # Find origin using py4DSTEM
+                qx0, qy0 = get_origin_single_dp(mean_dp, r)
+                
+                return int(round(qx0)), int(round(qy0))
+                
+            except Exception as e:
+                print(f"Warning: py4DSTEM origin detection failed ({e}), using fallback")
+        
+        # Fallback implementation (original custom approach)
         # Auto-detect probe size using py4DSTEM-style approach
         # Try multiple filter radii and find the most stable one
         min_size = min(self.pattern_shape)
@@ -142,7 +217,7 @@ class STEMVisualizer:
     
     def create_bright_field_image(self, radius: Optional[int] = None) -> np.ndarray:
         """
-        Create bright field image using circular mask centered on direct beam.
+        Create bright field image using py4DSTEM if available, fallback to custom implementation.
         
         Args:
             radius: Radius of circular bright field detector. If None, uses default.
@@ -150,6 +225,28 @@ class STEMVisualizer:
         Returns:
             Bright field image (scan_y, scan_x)
         """
+        if PY4DSTEM_AVAILABLE and self._py4dstem_datacube is not None:
+            try:
+                center_y, center_x = self.direct_beam_position
+                
+                if radius is None:
+                    radius = min(self.pattern_shape) // 20  # Default radius
+                
+                # Use py4DSTEM's virtual imaging
+                virtual_image = self._py4dstem_datacube.get_virtual_image(
+                    mode='circle',
+                    geometry=((center_x, center_y), radius),
+                    centered=False,
+                    calibrated=False,
+                    verbose=False
+                )
+                
+                return virtual_image.data
+                
+            except Exception as e:
+                print(f"Warning: py4DSTEM bright field imaging failed ({e}), using fallback")
+        
+        # Fallback implementation (original custom approach)
         center_y, center_x = self.direct_beam_position
         
         if radius is None:
@@ -168,24 +265,98 @@ class STEMVisualizer:
         
         return virtual_image
     
-    def _default_dark_field_region(self) -> Tuple[int, int, int, int]:
+    def _default_dark_field_region(self) -> Tuple[int, int, float, float]:
         """Default dark field region (annular) centered on direct beam."""
         center_y, center_x = self.direct_beam_position
-        outer_radius = min(self.pattern_shape) // 6  # Conservative size
-        return (center_y - outer_radius, center_y + outer_radius,
-                center_x - outer_radius, center_x + outer_radius)
+        inner_radius = min(self.pattern_shape) // 25  # Exclude direct beam
+        outer_radius = min(self.pattern_shape) // 6   # Collect scattered electrons
+        return (center_y, center_x, inner_radius, outer_radius)
     
     def set_bright_field_region(self, region: Tuple[int, int, int, int]):
         """Set bright field region (y_min, y_max, x_min, x_max)."""
         self.bright_field_region = region
     
-    def set_dark_field_region(self, region: Tuple[int, int, int, int]):
-        """Set dark field region (y_min, y_max, x_min, x_max)."""
+    def set_dark_field_region(self, region: Union[Tuple[int, int, int, int], Tuple[int, int, float, float]]):
+        """
+        Set dark field region. Supports both formats for backward compatibility:
+        - Old format: (y_min, y_max, x_min, x_max) - rectangular region
+        - New format: (center_y, center_x, inner_radius, outer_radius) - annular region
+        """
         self.dark_field_region = region
+        
+    def set_dark_field_annular(self, center_y: int, center_x: int, inner_radius: float, outer_radius: float):
+        """Set dark field annular detector parameters."""
+        self.dark_field_region = (center_y, center_x, inner_radius, outer_radius)
+    
+    def create_annular_mask(self, center_y: int, center_x: int, inner_radius: float, outer_radius: float) -> np.ndarray:
+        """
+        Create annular (ring-shaped) mask for dark field imaging.
+        
+        Args:
+            center_y, center_x: Center position of the annulus
+            inner_radius: Inner radius (excludes direct beam)
+            outer_radius: Outer radius
+            
+        Returns:
+            Boolean mask with True for pixels in the annular region
+        """
+        y_indices, x_indices = np.indices(self.pattern_shape)
+        distances = np.hypot(x_indices - center_x, y_indices - center_y)
+        
+        # Annular mask: pixels between inner and outer radius
+        mask = (distances >= inner_radius) & (distances <= outer_radius)
+        return mask
+    
+    def create_dark_field_image(self, inner_radius: Optional[float] = None, outer_radius: Optional[float] = None) -> np.ndarray:
+        """
+        Create dark field image using annular mask to exclude direct beam.
+        
+        Args:
+            inner_radius: Inner radius of annular detector (excludes direct beam)
+            outer_radius: Outer radius of annular detector
+        
+        Returns:
+            Dark field image (scan_y, scan_x)
+        """
+        center_y, center_x = self.direct_beam_position
+        
+        # Default radii based on pattern size
+        if inner_radius is None:
+            inner_radius = min(self.pattern_shape) // 25  # Exclude direct beam
+        if outer_radius is None:
+            outer_radius = min(self.pattern_shape) // 6   # Collect scattered electrons
+            
+        if PY4DSTEM_AVAILABLE and self._py4dstem_datacube is not None:
+            try:
+                # Use py4DSTEM's annular virtual imaging
+                virtual_image = self._py4dstem_datacube.get_virtual_image(
+                    mode='annular',
+                    geometry=((center_x, center_y), (inner_radius, outer_radius)),
+                    centered=False,
+                    calibrated=False,
+                    verbose=False
+                )
+                
+                return virtual_image.data
+                
+            except Exception as e:
+                print(f"Warning: py4DSTEM annular imaging failed ({e}), using fallback")
+        
+        # Fallback implementation using custom annular mask
+        mask = self.create_annular_mask(center_y, center_x, inner_radius, outer_radius)
+        
+        # Apply mask to all diffraction patterns and sum
+        virtual_image = np.zeros(self.scan_shape)
+        data_reshaped = self.data.reshape(-1, *self.pattern_shape)
+        
+        for i in range(len(data_reshaped)):
+            virtual_image.flat[i] = np.sum(data_reshaped[i] * mask)
+        
+        return virtual_image
     
     def create_virtual_field_image(self, field_region: Tuple[int, int, int, int]) -> np.ndarray:
         """
-        Create virtual field image by integrating over specified region.
+        Create virtual field image by integrating over specified rectangular region.
         
         Args:
             field_region: Region for integration (y_min, y_max, x_min, x_max)
@@ -193,6 +364,25 @@ class STEMVisualizer:
         Returns:
             Virtual field image (scan_y, scan_x)
         """
+        if PY4DSTEM_AVAILABLE and self._py4dstem_datacube is not None:
+            try:
+                y_min, y_max, x_min, x_max = field_region
+                
+                # Use py4DSTEM's rectangular virtual imaging
+                virtual_image = self._py4dstem_datacube.get_virtual_image(
+                    mode='rectangle',
+                    geometry=(x_min, x_max, y_min, y_max),
+                    centered=False,
+                    calibrated=False,
+                    verbose=False
+                )
+                
+                return virtual_image.data
+                
+            except Exception as e:
+                print(f"Warning: py4DSTEM virtual field imaging failed ({e}), using fallback")
+        
+        # Fallback implementation (original custom approach)
         y_min, y_max, x_min, x_max = field_region
         
         # Extract the field region from raw data and sum intensities
@@ -273,12 +463,29 @@ class STEMVisualizer:
             ax.add_patch(rect)
             ax.text(x_min, y_min-5, 'BF', color='red', fontsize=12, weight='bold')
             
-            # Dark field region
-            y_min, y_max, x_min, x_max = self.dark_field_region
-            rect = Rectangle((x_min, y_min), x_max-x_min, y_max-y_min, 
-                            fill=False, edgecolor='blue', linewidth=2)
-            ax.add_patch(rect)
-            ax.text(x_min, y_min-5, 'DF', color='blue', fontsize=12, weight='bold')
+            # Dark field region - handle both formats
+            if len(self.dark_field_region) == 4:
+                if isinstance(self.dark_field_region[2], float):
+                    # New annular format: (center_y, center_x, inner_radius, outer_radius)
+                    center_y, center_x, inner_radius, outer_radius = self.dark_field_region
+                    
+                    # Draw annular region
+                    from matplotlib.patches import Circle
+                    inner_circle = Circle((center_x, center_y), inner_radius, 
+                                        fill=False, edgecolor='blue', linewidth=2, linestyle='--')
+                    outer_circle = Circle((center_x, center_y), outer_radius,
+                                        fill=False, edgecolor='blue', linewidth=2)
+                    ax.add_patch(inner_circle)
+                    ax.add_patch(outer_circle)
+                    ax.text(center_x + outer_radius + 5, center_y, 'ADF', 
+                           color='blue', fontsize=12, weight='bold')
+                else:
+                    # Old rectangular format: (y_min, y_max, x_min, x_max)
+                    y_min, y_max, x_min, x_max = self.dark_field_region
+                    rect = Rectangle((x_min, y_min), x_max-x_min, y_max-y_min, 
+                                    fill=False, edgecolor='blue', linewidth=2)
+                    ax.add_patch(rect)
+                    ax.text(x_min, y_min-5, 'DF', color='blue', fontsize=12, weight='bold')
         
         if add_scalebar:
             self._add_scalebar(ax, pattern_scale=True)
@@ -302,10 +509,17 @@ class STEMVisualizer:
         cax = divider.append_axes("right", size="5%", pad=0.05)
         plt.colorbar(im1, cax=cax)
         
-        # Dark field image
-        df_image = self.create_virtual_field_image(self.dark_field_region)
+        # Dark field image - use proper annular detector
+        if isinstance(self.dark_field_region[2], float):
+            # New annular format
+            center_y, center_x, inner_radius, outer_radius = self.dark_field_region
+            df_image = self.create_dark_field_image(inner_radius, outer_radius)
+        else:
+            # Old rectangular format for backward compatibility
+            df_image = self.create_virtual_field_image(self.dark_field_region)
+            
         im2 = axes[2].imshow(df_image, cmap='hot')
-        axes[2].set_title('Virtual Dark Field')
+        axes[2].set_title('Virtual Dark Field (Annular)')
         axes[2].axis('off')
         divider = make_axes_locatable(axes[2])
         cax = divider.append_axes("right", size="5%", pad=0.05)
@@ -540,10 +754,17 @@ def main():
     axes[1].axis('off')
     visualizer._add_scalebar(axes[1], pattern_scale=False)
     
-    # Dark field image with scalebar
-    df_image = visualizer.create_virtual_field_image(visualizer.dark_field_region)
+    # Dark field image with scalebar - use proper annular detector
+    if isinstance(visualizer.dark_field_region[2], float):
+        # New annular format
+        center_y, center_x, inner_radius, outer_radius = visualizer.dark_field_region
+        df_image = visualizer.create_dark_field_image(inner_radius, outer_radius)
+    else:
+        # Old rectangular format for backward compatibility
+        df_image = visualizer.create_virtual_field_image(visualizer.dark_field_region)
+        
     axes[2].imshow(df_image, cmap='hot')
-    axes[2].set_title('Virtual Dark Field')
+    axes[2].set_title('Virtual Dark Field (Annular)')
     axes[2].axis('off')
     visualizer._add_scalebar(axes[2], pattern_scale=False)
     

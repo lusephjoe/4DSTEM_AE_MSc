@@ -15,5 +15,7 @@ scikit-image
 pandas
 seaborn
 
+py4DSTEM
+
 # dev
 pytest
