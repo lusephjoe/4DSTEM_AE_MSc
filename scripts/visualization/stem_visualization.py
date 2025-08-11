@@ -20,6 +20,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 import hyperspy.api as hs
 from matplotlib.widgets import RectangleSelector
 from scipy.ndimage import gaussian_filter
+from scipy.signal import find_peaks
 
 # py4DSTEM imports
 try:
@@ -54,9 +55,13 @@ class STEMVisualizer:
         # Find direct beam position
         self.direct_beam_position = self._find_direct_beam_position()
         
-        # Default field regions
+        # Detect Bragg spot characteristics
+        self.bragg_radius = self._detect_bragg_spot_radius()
+        
+        # Default field regions based on Bragg spot analysis
         self.bright_field_region = self._default_bright_field_region()
         self.dark_field_region = self._default_dark_field_region()
+        self.haadf_region = self._default_haadf_region()
         
         # Scalebar information
         self.scalebar_info = scalebar_info or {
@@ -140,7 +145,7 @@ class STEMVisualizer:
         return min(factors, key=lambda x: abs(x[0] - x[1]))
     
     def _find_direct_beam_position(self) -> Tuple[int, int]:
-        """Find the direct beam position using py4DSTEM if available, fallback to custom implementation."""
+        """Find the direct beam position optimized for bullseye/Bragg patterns."""
         # Calculate mean diffraction pattern for beam position detection
         # Use positive values only to handle reconstructed data with negatives
         mean_dp = np.mean(np.maximum(self.data, 0), axis=0)
@@ -159,54 +164,132 @@ class STEMVisualizer:
             except Exception as e:
                 print(f"Warning: py4DSTEM origin detection failed ({e}), using fallback")
         
-        # Fallback implementation (original custom approach)
-        # Auto-detect probe size using py4DSTEM-style approach
-        # Try multiple filter radii and find the most stable one
+        # Enhanced fallback implementation for bullseye patterns
+        # Use radial symmetry analysis to find the center
         min_size = min(self.pattern_shape)
-        test_radii = [min_size // 50, min_size // 30, min_size // 20, min_size // 15]
         
-        best_center = None
-        best_score = 0
+        # First pass: rough center estimation using maximum intensity
+        rough_center_y, rough_center_x = np.unravel_index(np.argmax(mean_dp), mean_dp.shape)
         
-        for r in test_radii:
-            if r < 1:
-                continue
+        # Second pass: refine using radial symmetry
+        # Test a small grid around the rough center
+        search_radius = min_size // 20
+        best_center = (rough_center_y, rough_center_x)
+        best_symmetry_score = 0
+        
+        y_indices, x_indices = np.indices(mean_dp.shape)
+        
+        for dy in range(-search_radius, search_radius + 1, 2):
+            for dx in range(-search_radius, search_radius + 1, 2):
+                test_y = rough_center_y + dy
+                test_x = rough_center_x + dx
                 
-            # Apply gaussian filter and find brightest spot
-            filtered_dp = gaussian_filter(mean_dp, r, mode='nearest')
-            center_y, center_x = np.unravel_index(np.argmax(filtered_dp), filtered_dp.shape)
-            
-            # Score this center based on peak intensity and sharpness
-            y_indices, x_indices = np.indices(mean_dp.shape)
-            mask = np.hypot(x_indices - center_x, y_indices - center_y) < r * 2
-            peak_intensity = np.max(filtered_dp)
-            background = np.mean(filtered_dp[~mask])
-            score = peak_intensity / (background + 1e-10)  # Signal to background ratio
-            
-            if score > best_score:
-                best_score = score
-                best_center = (center_y, center_x)
-        
-        if best_center is None:
-            # Fallback to simple maximum
-            center_y, center_x = np.unravel_index(np.argmax(mean_dp), mean_dp.shape)
-            return center_y, center_x
+                # Check bounds
+                if test_y < 0 or test_y >= mean_dp.shape[0] or test_x < 0 or test_x >= mean_dp.shape[1]:
+                    continue
+                
+                # Calculate radial distances from this test center
+                distances = np.hypot(x_indices - test_x, y_indices - test_y)
+                
+                # Test symmetry by comparing opposite quadrants
+                symmetry_score = self._calculate_radial_symmetry(mean_dp, test_y, test_x, distances)
+                
+                if symmetry_score > best_symmetry_score:
+                    best_symmetry_score = symmetry_score
+                    best_center = (test_y, test_x)
         
         center_y, center_x = best_center
         
-        # Refine position using center of mass with optimal radius
-        optimal_r = min_size // 25
-        y_indices, x_indices = np.indices(mean_dp.shape)
-        mask = np.hypot(x_indices - center_x, y_indices - center_y) < optimal_r
+        # Final refinement using center of mass on the central peak
+        refined_r = min_size // 30  # Small radius for center refinement
+        mask = np.hypot(x_indices - center_x, y_indices - center_y) <= refined_r
         
-        # Center of mass calculation
+        # Center of mass calculation on the central region
         total_intensity = np.sum(mean_dp * mask)
         if total_intensity > 0:
             x_com = np.sum(x_indices * mean_dp * mask) / total_intensity
             y_com = np.sum(y_indices * mean_dp * mask) / total_intensity
-            return int(round(y_com)), int(round(x_com))
+            
+            # Ensure the refined center is reasonable
+            if abs(x_com - center_x) < refined_r and abs(y_com - center_y) < refined_r:
+                return int(round(y_com)), int(round(x_com))
+        
+        return center_y, center_x
+    
+    def _calculate_radial_symmetry(self, pattern: np.ndarray, center_y: int, center_x: int, distances: np.ndarray) -> float:
+        """Calculate radial symmetry score for a potential beam center."""
+        # Define annular regions for symmetry testing
+        min_radius = 5
+        max_radius = min(pattern.shape) // 4
+        n_rings = 8
+        
+        symmetry_scores = []
+        
+        for r in np.linspace(min_radius, max_radius, n_rings):
+            # Create annular mask
+            inner_r = r - 2
+            outer_r = r + 2
+            ring_mask = (distances >= inner_r) & (distances <= outer_r)
+            
+            if np.sum(ring_mask) < 10:  # Skip if too few pixels
+                continue
+                
+            # Get intensities in this ring
+            ring_intensities = pattern[ring_mask]
+            
+            # Calculate angular positions
+            y_coords, x_coords = np.where(ring_mask)
+            angles = np.arctan2(y_coords - center_y, x_coords - center_x)
+            
+            # Sort by angle
+            sorted_indices = np.argsort(angles)
+            sorted_intensities = ring_intensities[sorted_indices]
+            
+            # Calculate correlation with shifted version (tests for rotational symmetry)
+            if len(sorted_intensities) > 8:
+                shift = len(sorted_intensities) // 4  # 90 degree rotation
+                correlation = np.corrcoef(sorted_intensities[:-shift], sorted_intensities[shift:])[0, 1]
+                if not np.isnan(correlation):
+                    symmetry_scores.append(abs(correlation))
+        
+        return np.mean(symmetry_scores) if symmetry_scores else 0.0
+    
+    def _detect_bragg_spot_radius(self) -> float:
+        """Detect the typical distance to the first Bragg spots from the beam center."""
+        mean_dp = np.mean(np.maximum(self.data, 0), axis=0)
+        center_y, center_x = self.direct_beam_position
+        
+        # Create radial profile
+        y_indices, x_indices = np.indices(mean_dp.shape)
+        distances = np.hypot(x_indices - center_x, y_indices - center_y)
+        
+        # Calculate radial average
+        max_radius = min(mean_dp.shape) // 2
+        radii = np.arange(1, max_radius)
+        radial_profile = []
+        
+        for r in radii:
+            ring_mask = (distances >= r - 0.5) & (distances < r + 0.5)
+            if np.sum(ring_mask) > 0:
+                radial_profile.append(np.mean(mean_dp[ring_mask]))
+            else:
+                radial_profile.append(0)
+        
+        radial_profile = np.array(radial_profile)
+        
+        # Find peaks in the radial profile (excluding the central peak)
+        peaks, properties = find_peaks(radial_profile, height=np.max(radial_profile) * 0.1, distance=5)
+        
+        if len(peaks) > 0:
+            # Return the radius of the first significant peak
+            first_bragg_radius = radii[peaks[0]]
+            print(f"Detected first Bragg spot at radius: {first_bragg_radius:.1f} pixels")
+            return float(first_bragg_radius)
         else:
-            return center_y, center_x
+            # Fallback estimate
+            fallback_radius = min(mean_dp.shape) // 8
+            print(f"No clear Bragg peaks detected, using fallback radius: {fallback_radius}")
+            return float(fallback_radius)
     
     def _default_bright_field_region(self) -> Tuple[int, int, int, int]:
         """Default bright field region centered on direct beam (kept for compatibility)."""
@@ -215,12 +298,12 @@ class STEMVisualizer:
         return (center_y - region_size, center_y + region_size,
                 center_x - region_size, center_x + region_size)
     
-    def create_bright_field_image(self, radius: Optional[int] = None) -> np.ndarray:
+    def create_bright_field_image(self, radius: Optional[float] = None) -> np.ndarray:
         """
         Create bright field image using py4DSTEM if available, fallback to custom implementation.
         
         Args:
-            radius: Radius of circular bright field detector. If None, uses default.
+            radius: Radius of circular bright field detector. If None, uses Bragg-informed default.
         
         Returns:
             Bright field image (scan_y, scan_x)
@@ -230,7 +313,7 @@ class STEMVisualizer:
                 center_y, center_x = self.direct_beam_position
                 
                 if radius is None:
-                    radius = min(self.pattern_shape) // 20  # Default radius
+                    radius = self.bragg_radius * 0.8  # Stop before Bragg spots
                 
                 # Use py4DSTEM's virtual imaging
                 virtual_image = self._py4dstem_datacube.get_virtual_image(
@@ -250,7 +333,7 @@ class STEMVisualizer:
         center_y, center_x = self.direct_beam_position
         
         if radius is None:
-            radius = min(self.pattern_shape) // 20  # Default radius
+            radius = self.bragg_radius * 0.8  # Stop before Bragg spots
         
         # Create circular mask
         y_indices, x_indices = np.indices(self.pattern_shape)
@@ -258,18 +341,30 @@ class STEMVisualizer:
         
         # Apply mask to all diffraction patterns and sum
         virtual_image = np.zeros(self.scan_shape)
-        data_reshaped = self.data.reshape(-1, *self.pattern_shape)
         
-        for i in range(len(data_reshaped)):
-            virtual_image.flat[i] = np.sum(data_reshaped[i] * mask)
+        # Ensure proper scan coordinate mapping
+        for i in range(self.data.shape[0]):
+            # Convert linear index to 2D scan coordinates
+            scan_y = i // self.scan_shape[1]  
+            scan_x = i % self.scan_shape[1]
+            virtual_image[scan_y, scan_x] = np.sum(self.data[i] * mask)
         
         return virtual_image
     
     def _default_dark_field_region(self) -> Tuple[int, int, float, float]:
-        """Default dark field region (annular) centered on direct beam."""
+        """Default conventional dark field region based on Bragg spot analysis."""
         center_y, center_x = self.direct_beam_position
-        inner_radius = min(self.pattern_shape) // 25  # Exclude direct beam
-        outer_radius = min(self.pattern_shape) // 6   # Collect scattered electrons
+        # Conventional DF: sample around the Bragg spots
+        inner_radius = self.bragg_radius * 0.9  # Just inside Bragg spots
+        outer_radius = self.bragg_radius * 1.1  # Just outside Bragg spots
+        return (center_y, center_x, inner_radius, outer_radius)
+    
+    def _default_haadf_region(self) -> Tuple[int, int, float, float]:
+        """Default HAADF region for high-angle incoherent scattering."""
+        center_y, center_x = self.direct_beam_position
+        # HAADF: high-angle region beyond coherent Bragg scattering
+        inner_radius = self.bragg_radius * 1.5  # Well beyond Bragg spots
+        outer_radius = min(self.pattern_shape) // 3  # Extend to detector edge
         return (center_y, center_x, inner_radius, outer_radius)
     
     def set_bright_field_region(self, region: Tuple[int, int, int, int]):
@@ -347,10 +442,63 @@ class STEMVisualizer:
         
         # Apply mask to all diffraction patterns and sum
         virtual_image = np.zeros(self.scan_shape)
-        data_reshaped = self.data.reshape(-1, *self.pattern_shape)
         
-        for i in range(len(data_reshaped)):
-            virtual_image.flat[i] = np.sum(data_reshaped[i] * mask)
+        # Ensure proper scan coordinate mapping
+        for i in range(self.data.shape[0]):
+            # Convert linear index to 2D scan coordinates
+            scan_y = i // self.scan_shape[1]  
+            scan_x = i % self.scan_shape[1]
+            virtual_image[scan_y, scan_x] = np.sum(self.data[i] * mask)
+        
+        return virtual_image
+    
+    def create_haadf_image(self, inner_radius: Optional[float] = None, outer_radius: Optional[float] = None) -> np.ndarray:
+        """
+        Create High-Angle Annular Dark Field (HAADF) image for Z-contrast imaging.
+        
+        Args:
+            inner_radius: Inner radius of HAADF detector (well beyond Bragg spots)
+            outer_radius: Outer radius of HAADF detector (extends to detector edge)
+        
+        Returns:
+            HAADF image (scan_y, scan_x)
+        """
+        center_y, center_x = self.direct_beam_position
+        
+        # HAADF defaults: high-angle incoherent scattering region
+        if inner_radius is None:
+            inner_radius = self.bragg_radius * 1.5  # Well beyond Bragg spots
+        if outer_radius is None:
+            outer_radius = min(self.pattern_shape) // 3  # Extend toward detector edge
+            
+        if PY4DSTEM_AVAILABLE and self._py4dstem_datacube is not None:
+            try:
+                # Use py4DSTEM's annular virtual imaging
+                virtual_image = self._py4dstem_datacube.get_virtual_image(
+                    mode='annular',
+                    geometry=((center_x, center_y), (inner_radius, outer_radius)),
+                    centered=False,
+                    calibrated=False,
+                    verbose=False
+                )
+                
+                return virtual_image.data
+                
+            except Exception as e:
+                print(f"Warning: py4DSTEM HAADF imaging failed ({e}), using fallback")
+        
+        # Fallback implementation using custom annular mask
+        mask = self.create_annular_mask(center_y, center_x, inner_radius, outer_radius)
+        
+        # Apply mask to all diffraction patterns and sum
+        virtual_image = np.zeros(self.scan_shape)
+        
+        # Ensure proper scan coordinate mapping
+        for i in range(self.data.shape[0]):
+            # Convert linear index to 2D scan coordinates
+            scan_y = i // self.scan_shape[1]  
+            scan_x = i % self.scan_shape[1]
+            virtual_image[scan_y, scan_x] = np.sum(self.data[i] * mask)
         
         return virtual_image
     
@@ -451,41 +599,47 @@ class STEMVisualizer:
         ax.axis('off')
         
         if show_regions:
-            # Mark direct beam position
+            # Mark direct beam position and Bragg radius
             y_beam, x_beam = self.direct_beam_position
             ax.plot(x_beam, y_beam, 'w+', markersize=15, markeredgewidth=3)
             ax.plot(x_beam, y_beam, 'k+', markersize=12, markeredgewidth=2)
             
-            # Bright field region
-            y_min, y_max, x_min, x_max = self.bright_field_region
-            rect = Rectangle((x_min, y_min), x_max-x_min, y_max-y_min, 
-                            fill=False, edgecolor='red', linewidth=2)
-            ax.add_patch(rect)
-            ax.text(x_min, y_min-5, 'BF', color='red', fontsize=12, weight='bold')
+            # Show Bragg spot radius for reference
+            from matplotlib.patches import Circle
+            bragg_circle = Circle((x_beam, y_beam), self.bragg_radius,
+                                fill=False, edgecolor='yellow', linewidth=1, linestyle=':')
+            ax.add_patch(bragg_circle)
+            ax.text(x_beam + self.bragg_radius + 5, y_beam - self.bragg_radius/2, 
+                   f'Bragg\nr={self.bragg_radius:.1f}', color='yellow', fontsize=8, weight='bold')
             
-            # Dark field region - handle both formats
-            if len(self.dark_field_region) == 4:
-                if isinstance(self.dark_field_region[2], float):
-                    # New annular format: (center_y, center_x, inner_radius, outer_radius)
-                    center_y, center_x, inner_radius, outer_radius = self.dark_field_region
-                    
-                    # Draw annular region
-                    from matplotlib.patches import Circle
-                    inner_circle = Circle((center_x, center_y), inner_radius, 
-                                        fill=False, edgecolor='blue', linewidth=2, linestyle='--')
-                    outer_circle = Circle((center_x, center_y), outer_radius,
-                                        fill=False, edgecolor='blue', linewidth=2)
-                    ax.add_patch(inner_circle)
-                    ax.add_patch(outer_circle)
-                    ax.text(center_x + outer_radius + 5, center_y, 'ADF', 
-                           color='blue', fontsize=12, weight='bold')
-                else:
-                    # Old rectangular format: (y_min, y_max, x_min, x_max)
-                    y_min, y_max, x_min, x_max = self.dark_field_region
-                    rect = Rectangle((x_min, y_min), x_max-x_min, y_max-y_min, 
-                                    fill=False, edgecolor='blue', linewidth=2)
-                    ax.add_patch(rect)
-                    ax.text(x_min, y_min-5, 'DF', color='blue', fontsize=12, weight='bold')
+            # Bright field region (circular)
+            bf_radius = self.bragg_radius * 0.8  # Default BF radius
+            bf_circle = Circle((x_beam, y_beam), bf_radius,
+                             fill=False, edgecolor='red', linewidth=2)
+            ax.add_patch(bf_circle)
+            ax.text(x_beam - bf_radius - 15, y_beam, 'BF', color='red', fontsize=12, weight='bold')
+            
+            # Conventional Dark field region (annular around Bragg spots)
+            center_y, center_x, inner_radius, outer_radius = self.dark_field_region
+            inner_circle = Circle((center_x, center_y), inner_radius, 
+                                fill=False, edgecolor='blue', linewidth=2, linestyle='--')
+            outer_circle = Circle((center_x, center_y), outer_radius,
+                                fill=False, edgecolor='blue', linewidth=2)
+            ax.add_patch(inner_circle)
+            ax.add_patch(outer_circle)
+            ax.text(center_x + outer_radius + 5, center_y + outer_radius/2, 'DF', 
+                   color='blue', fontsize=12, weight='bold')
+            
+            # HAADF region (high-angle annular)
+            haadf_center_y, haadf_center_x, haadf_inner, haadf_outer = self.haadf_region
+            haadf_inner_circle = Circle((haadf_center_x, haadf_center_y), haadf_inner,
+                                      fill=False, edgecolor='orange', linewidth=2, linestyle='--')
+            haadf_outer_circle = Circle((haadf_center_x, haadf_center_y), haadf_outer,
+                                      fill=False, edgecolor='orange', linewidth=2)
+            ax.add_patch(haadf_inner_circle)
+            ax.add_patch(haadf_outer_circle)
+            ax.text(haadf_center_x + haadf_outer + 5, haadf_center_y - haadf_outer/2, 'HAADF',
+                   color='orange', fontsize=12, weight='bold')
         
         if add_scalebar:
             self._add_scalebar(ax, pattern_scale=True)
