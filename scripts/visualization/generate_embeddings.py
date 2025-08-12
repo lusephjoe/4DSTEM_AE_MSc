@@ -245,46 +245,79 @@ def load_model(checkpoint_path: Path, device: torch.device) -> torch.nn.Module:
     
     if checkpoint_path.suffix == '.ckpt':
         # PyTorch Lightning checkpoint
-        try:
-            # Try to load as Lightning checkpoint first
-            model = LitAE.load_from_checkpoint(checkpoint_path, map_location=device)
-            encoder = model.model.encoder
-            print("✓ Loaded PyTorch Lightning checkpoint")
-        except Exception as e:
-            print(f"Lightning loading failed: {e}")
-            # Fallback: Load checkpoint manually
-            checkpoint = torch.load(checkpoint_path, map_location=device)
+        
+        # First, check if checkpoint has _orig_mod prefixes and preprocess if needed
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        state_dict = checkpoint['state_dict']
+        
+        # Handle torch.compile() checkpoint keys with _orig_mod prefixes
+        if any(key.startswith('_orig_mod.') for key in state_dict.keys()):
+            print("✓ Detected compiled model checkpoint, removing _orig_mod prefixes")
+            # Remove _orig_mod. prefixes from all keys
+            cleaned_state_dict = {}
+            for key, value in state_dict.items():
+                if key.startswith('_orig_mod.'):
+                    new_key = key[10:]  # Remove '_orig_mod.' prefix
+                    cleaned_state_dict[new_key] = value
+                else:
+                    cleaned_state_dict[key] = value
             
-            # Extract hyperparameters
-            if 'hyper_parameters' in checkpoint:
-                hparams = checkpoint['hyper_parameters']
-                latent_dim = hparams.get('latent_dim', 128)
-                out_shape = (256, 256)  # Default
-            else:
-                latent_dim = 128
-                out_shape = (256, 256)
-                print("Warning: Using default hyperparameters")
+            # Update checkpoint with cleaned state dict
+            checkpoint['state_dict'] = cleaned_state_dict
             
-            # Create model and load state
-            model = LitAE(latent_dim=latent_dim, lr=1e-3, out_shape=out_shape)
+            # Save temporary cleaned checkpoint
+            import tempfile
+            import os
+            temp_checkpoint_path = tempfile.mktemp(suffix='.ckpt')
+            torch.save(checkpoint, temp_checkpoint_path)
             
-            # Handle torch.compile() checkpoint keys with _orig_mod prefixes
-            state_dict = checkpoint['state_dict']
-            if any(key.startswith('_orig_mod.') for key in state_dict.keys()):
-                print("✓ Detected compiled model checkpoint, removing _orig_mod prefixes")
-                # Remove _orig_mod. prefixes from all keys
-                cleaned_state_dict = {}
-                for key, value in state_dict.items():
-                    if key.startswith('_orig_mod.'):
-                        new_key = key[10:]  # Remove '_orig_mod.' prefix
-                        cleaned_state_dict[new_key] = value
-                    else:
-                        cleaned_state_dict[key] = value
-                state_dict = cleaned_state_dict
-            
-            model.load_state_dict(state_dict)
-            encoder = model.model.encoder
-            print("✓ Loaded checkpoint manually")
+            try:
+                # Try to load cleaned checkpoint with Lightning
+                model = LitAE.load_from_checkpoint(temp_checkpoint_path, map_location=device)
+                encoder = model.model.encoder
+                print("✓ Loaded PyTorch Lightning checkpoint (cleaned _orig_mod prefixes)")
+            except Exception as e:
+                print(f"Lightning loading failed even after cleaning: {e}")
+                # Manual fallback
+                if 'hyper_parameters' in checkpoint:
+                    hparams = checkpoint['hyper_parameters']
+                    latent_dim = hparams.get('latent_dim', 128)
+                    out_shape = (256, 256)  # Default
+                else:
+                    latent_dim = 128
+                    out_shape = (256, 256)
+                    print("Warning: Using default hyperparameters")
+                
+                model = LitAE(latent_dim=latent_dim, lr=1e-3, out_shape=out_shape)
+                model.load_state_dict(cleaned_state_dict)
+                encoder = model.model.encoder
+                print("✓ Loaded checkpoint manually")
+            finally:
+                # Clean up temporary file
+                if os.path.exists(temp_checkpoint_path):
+                    os.unlink(temp_checkpoint_path)
+        else:
+            # Standard checkpoint without _orig_mod prefixes
+            try:
+                model = LitAE.load_from_checkpoint(checkpoint_path, map_location=device)
+                encoder = model.model.encoder
+                print("✓ Loaded PyTorch Lightning checkpoint")
+            except Exception as e:
+                print(f"Lightning loading failed: {e}")
+                # Fallback: Load checkpoint manually
+                if 'hyper_parameters' in checkpoint:
+                    hparams = checkpoint['hyper_parameters']
+                    latent_dim = hparams.get('latent_dim', 128)
+                    out_shape = (256, 256)  # Default
+                else:
+                    latent_dim = 128
+                    out_shape = (256, 256)
+                    print("Warning: Using default hyperparameters")
+                
+                model = LitAE(latent_dim=latent_dim, lr=1e-3, out_shape=out_shape)
+                model.load_state_dict(state_dict)
+                encoder = model.model.encoder
+                print("✓ Loaded checkpoint manually")
     
     else:
         # Legacy PyTorch checkpoint
