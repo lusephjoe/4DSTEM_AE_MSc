@@ -247,7 +247,7 @@ def load_model(checkpoint_path: Path, device: torch.device) -> torch.nn.Module:
         # PyTorch Lightning checkpoint
         
         # First, check if we need to preprocess the checkpoint for _orig_mod prefixes
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         state_dict = checkpoint['state_dict']
         
         # Check for _orig_mod prefixes and clean if needed
@@ -289,7 +289,7 @@ def load_model(checkpoint_path: Path, device: torch.device) -> torch.nn.Module:
     
     else:
         # Legacy PyTorch checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         
         if "model_state_dict" in checkpoint:
             state = checkpoint["model_state_dict"]
@@ -523,7 +523,7 @@ def load_data(args) -> Tuple[torch.utils.data.DataLoader, Optional[np.ndarray], 
     else:
         # Legacy PyTorch tensor data
         print(f"Loading PyTorch tensor from: {args.input}")
-        data = torch.load(args.input, map_location="cpu")
+        data = torch.load(args.input, map_location="cpu", weights_only=False)
         
         # Sample subset if requested
         if args.n_samples and args.n_samples < len(data):
