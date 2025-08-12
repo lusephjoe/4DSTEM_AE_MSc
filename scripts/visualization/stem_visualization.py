@@ -55,6 +55,9 @@ class STEMVisualizer:
         # Find direct beam position
         self.direct_beam_position = self._find_direct_beam_position()
         
+        # Pre-calculate common arrays for efficiency
+        self.y_indices, self.x_indices = np.indices(self.pattern_shape)
+        
         # Detect Bragg spot characteristics
         self.bragg_radius = self._detect_bragg_spot_radius()
         
@@ -76,7 +79,7 @@ class STEMVisualizer:
             self._create_py4dstem_datacube()
         
     def _prepare_data(self, data: Union[np.ndarray, torch.Tensor]) -> np.ndarray:
-        """Convert input data to numpy array with proper shape and preprocess."""
+        """Convert input data to numpy array with minimal preprocessing."""
         if isinstance(data, torch.Tensor):
             data = data.detach().cpu().numpy()
         
@@ -84,34 +87,26 @@ class STEMVisualizer:
         if data.ndim == 4:
             data = data.squeeze(1)  # Remove channel dimension
         
-        # Convert to float32 if needed for scipy compatibility
-        original_dtype = data.dtype
-        if data.dtype in [np.float16, np.int8, np.int16, np.uint8, np.uint16]:
-            print(f"Converting data from {original_dtype} to float32 for processing compatibility")
-            data = data.astype(np.float32)
-            self.original_dtype = original_dtype
-        else:
-            self.original_dtype = data.dtype
+        # Store original dtype - keep it unchanged for efficiency
+        self.original_dtype = data.dtype
+        print(f"Using original data type: {self.original_dtype}")
         
-        # Enhanced preprocessing for better virtual imaging
-        # 1. Handle negative values from reconstructions
+        # Minimal preprocessing - work with original dtype
+        # 1. Handle negative values (works with any dtype)
         data_positive = np.maximum(data, 0)
         
-        # 2. Remove extreme outliers (hot pixels) using percentile clipping
-        p99 = np.percentile(data_positive, 99.9)
+        # 2. Simple outlier handling without type conversion
+        # Use numpy functions that preserve dtype
+        p99 = np.percentile(data_positive.astype(np.float64), 99.9)  # Only convert for percentile calc
         data_clipped = np.minimum(data_positive, p99)
         
-        # 3. Apply median filter to reduce hot pixel artifacts
-        from scipy.ndimage import median_filter
-        data_filtered = np.zeros_like(data_clipped)
-        for i in range(data_clipped.shape[0]):
-            data_filtered[i] = median_filter(data_clipped[i], size=3)
+        # 3. Skip median filter for now - it forces float64 conversion
+        # Instead use a simpler approach that preserves dtype
         
-        # Store both raw and processed data
+        # Store processed data in original dtype
         self.data_raw = data.copy()  # Keep original for fallback
-        self.log_data = np.log(data_filtered + 1)  # Log-transformed for visualization
         
-        return data_filtered
+        return data_clipped
     
     def _create_py4dstem_datacube(self):
         """Create py4DSTEM DataCube from the data."""
@@ -148,7 +143,8 @@ class STEMVisualizer:
         """Find the direct beam position optimized for bullseye/Bragg patterns."""
         # Calculate mean diffraction pattern for beam position detection
         # Use positive values only to handle reconstructed data with negatives
-        mean_dp = np.mean(np.maximum(self.data, 0), axis=0)
+        # Work with original dtype, only convert for specific operations that need it
+        mean_dp = np.mean(np.maximum(self.data, 0), axis=0).astype(np.float32)
         
         if PY4DSTEM_AVAILABLE:
             try:
@@ -256,7 +252,7 @@ class STEMVisualizer:
     
     def _detect_bragg_spot_radius(self) -> float:
         """Detect the typical distance to the first Bragg spots from the beam center."""
-        mean_dp = np.mean(np.maximum(self.data, 0), axis=0)
+        mean_dp = np.mean(np.maximum(self.data, 0), axis=0).astype(np.float32)
         center_y, center_x = self.direct_beam_position
         
         # Create radial profile
@@ -335,36 +331,33 @@ class STEMVisualizer:
         if radius is None:
             radius = self.bragg_radius * 0.8  # Stop before Bragg spots
         
-        # Create circular mask
-        y_indices, x_indices = np.indices(self.pattern_shape)
-        mask = np.hypot(x_indices - center_x, y_indices - center_y) <= radius
+        # Create circular mask using cached indices
+        mask = np.hypot(self.x_indices - center_x, self.y_indices - center_y) <= radius
         
-        # Apply mask to all diffraction patterns and sum
-        virtual_image = np.zeros(self.scan_shape)
+        # Apply mask to all diffraction patterns and sum (vectorized - much faster!)
+        # Multiply all patterns by mask at once, then sum over detector dimensions
+        masked_data = self.data.astype(np.float64) * mask[np.newaxis, :, :]
+        flat_intensities = np.sum(masked_data, axis=(1, 2))
         
-        # Ensure proper scan coordinate mapping
-        for i in range(self.data.shape[0]):
-            # Convert linear index to 2D scan coordinates
-            scan_y = i // self.scan_shape[1]  
-            scan_x = i % self.scan_shape[1]
-            virtual_image[scan_y, scan_x] = np.sum(self.data[i] * mask)
+        # Reshape to scan grid with proper coordinate mapping
+        virtual_image = flat_intensities.reshape(self.scan_shape).astype(np.float32)
         
         return virtual_image
     
     def _default_dark_field_region(self) -> Tuple[int, int, float, float]:
         """Default conventional dark field region based on Bragg spot analysis."""
         center_y, center_x = self.direct_beam_position
-        # Conventional DF: sample around the Bragg spots
-        inner_radius = self.bragg_radius * 0.9  # Just inside Bragg spots
-        outer_radius = self.bragg_radius * 1.1  # Just outside Bragg spots
+        # Conventional DF: sample around the Bragg spots with wider range
+        inner_radius = self.bragg_radius * 1.2  # Start beyond the Bragg spots
+        outer_radius = self.bragg_radius * 2.0  # Wider annular region
         return (center_y, center_x, inner_radius, outer_radius)
     
     def _default_haadf_region(self) -> Tuple[int, int, float, float]:
         """Default HAADF region for high-angle incoherent scattering."""
         center_y, center_x = self.direct_beam_position
         # HAADF: high-angle region beyond coherent Bragg scattering
-        inner_radius = self.bragg_radius * 1.5  # Well beyond Bragg spots
-        outer_radius = min(self.pattern_shape) // 3  # Extend to detector edge
+        inner_radius = self.bragg_radius * 2.5  # Well beyond Bragg spots
+        outer_radius = min(self.pattern_shape) // 4.5  # Reduce outer radius by ~1/3
         return (center_y, center_x, inner_radius, outer_radius)
     
     def set_bright_field_region(self, region: Tuple[int, int, int, int]):
@@ -395,8 +388,8 @@ class STEMVisualizer:
         Returns:
             Boolean mask with True for pixels in the annular region
         """
-        y_indices, x_indices = np.indices(self.pattern_shape)
-        distances = np.hypot(x_indices - center_x, y_indices - center_y)
+        # Use cached indices for efficiency
+        distances = np.hypot(self.x_indices - center_x, self.y_indices - center_y)
         
         # Annular mask: pixels between inner and outer radius
         mask = (distances >= inner_radius) & (distances <= outer_radius)
@@ -440,15 +433,13 @@ class STEMVisualizer:
         # Fallback implementation using custom annular mask
         mask = self.create_annular_mask(center_y, center_x, inner_radius, outer_radius)
         
-        # Apply mask to all diffraction patterns and sum
-        virtual_image = np.zeros(self.scan_shape)
+        # Apply mask to all diffraction patterns and sum (vectorized - much faster!)
+        # Multiply all patterns by mask at once, then sum over detector dimensions
+        masked_data = self.data.astype(np.float64) * mask[np.newaxis, :, :]
+        flat_intensities = np.sum(masked_data, axis=(1, 2))
         
-        # Ensure proper scan coordinate mapping
-        for i in range(self.data.shape[0]):
-            # Convert linear index to 2D scan coordinates
-            scan_y = i // self.scan_shape[1]  
-            scan_x = i % self.scan_shape[1]
-            virtual_image[scan_y, scan_x] = np.sum(self.data[i] * mask)
+        # Reshape to scan grid with proper coordinate mapping
+        virtual_image = flat_intensities.reshape(self.scan_shape).astype(np.float32)
         
         return virtual_image
     
@@ -490,15 +481,13 @@ class STEMVisualizer:
         # Fallback implementation using custom annular mask
         mask = self.create_annular_mask(center_y, center_x, inner_radius, outer_radius)
         
-        # Apply mask to all diffraction patterns and sum
-        virtual_image = np.zeros(self.scan_shape)
+        # Apply mask to all diffraction patterns and sum (vectorized - much faster!)
+        # Multiply all patterns by mask at once, then sum over detector dimensions
+        masked_data = self.data.astype(np.float64) * mask[np.newaxis, :, :]
+        flat_intensities = np.sum(masked_data, axis=(1, 2))
         
-        # Ensure proper scan coordinate mapping
-        for i in range(self.data.shape[0]):
-            # Convert linear index to 2D scan coordinates
-            scan_y = i // self.scan_shape[1]  
-            scan_x = i % self.scan_shape[1]
-            virtual_image[scan_y, scan_x] = np.sum(self.data[i] * mask)
+        # Reshape to scan grid with proper coordinate mapping
+        virtual_image = flat_intensities.reshape(self.scan_shape).astype(np.float32)
         
         return virtual_image
     
@@ -542,104 +531,638 @@ class STEMVisualizer:
         
         return virtual_image
     
+    def create_radial_profile(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Create radial intensity profile from the mean diffraction pattern.
+        
+        Returns:
+            Tuple of (radii, radial_profile) arrays
+        """
+        mean_pattern = np.mean(np.maximum(self.data, 0), axis=0).astype(np.float32)
+        center_y, center_x = self.direct_beam_position
+        y_indices, x_indices = np.indices(mean_pattern.shape)
+        distances = np.hypot(x_indices - center_x, y_indices - center_y)
+        
+        # Calculate radial profile
+        max_radius = min(mean_pattern.shape) // 2
+        radii = np.arange(1, max_radius)
+        radial_profile = []
+        
+        for r in radii:
+            ring_mask = (distances >= r - 0.5) & (distances < r + 0.5)
+            if np.sum(ring_mask) > 0:
+                radial_profile.append(np.mean(mean_pattern[ring_mask]))
+            else:
+                radial_profile.append(0)
+        
+        return radii, np.array(radial_profile)
+    
+    def plot_radial_profile(self, ax=None) -> plt.Axes:
+        """
+        Plot radial intensity profile with detector region markers.
+        
+        Args:
+            ax: Matplotlib axes to plot on. If None, creates new figure.
+            
+        Returns:
+            Matplotlib axes object
+        """
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(8, 6))
+        
+        radii, radial_profile = self.create_radial_profile()
+        
+        ax.plot(radii, radial_profile, 'b-', linewidth=2)
+        ax.axvline(self.bragg_radius, color='yellow', linestyle='--', label=f'Bragg: {self.bragg_radius:.1f}')
+        ax.axvline(self.bragg_radius * 0.8, color='red', linestyle=':', label='BF limit')
+        ax.axvline(self.bragg_radius * 1.5, color='orange', linestyle=':', label='HAADF start')
+        ax.set_xlabel('Radius (pixels)')
+        ax.set_ylabel('Intensity')
+        ax.set_title('Radial Profile Analysis')
+        ax.legend(fontsize=8)
+        ax.set_yscale('log')
+        
+        # Add more tick marks with numerical labels on y-axis (intensity)
+        from matplotlib.ticker import LogLocator, LogFormatterMathText
+        ax.yaxis.set_major_locator(LogLocator(base=10.0, numticks=10))
+        ax.yaxis.set_minor_locator(LogLocator(base=10.0, subs=[2, 3, 4, 5, 6, 7, 8, 9], numticks=10))
+        ax.yaxis.set_major_formatter(LogFormatterMathText(base=10.0))
+        ax.grid(True, which='major', alpha=0.3)
+        ax.grid(True, which='minor', alpha=0.1)
+        
+        return ax
+    
+    def create_detector_schematic(self, ax=None, size=(100, 100)) -> plt.Axes:
+        """
+        Create a schematic diagram showing detector geometries.
+        
+        Args:
+            ax: Matplotlib axes to plot on. If None, creates new figure.
+            size: Tuple of (width, height) for the schematic
+            
+        Returns:
+            Matplotlib axes object
+        """
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(6, 6))
+            
+        ax.set_xlim(0, size[0])
+        ax.set_ylim(0, size[1])
+        ax.set_aspect('equal')
+        
+        # Draw detector schematic - scale relative to pattern
+        center_x, center_y = size[0] // 2, size[1] // 2
+        scale_factor = min(size) / min(self.pattern_shape) * 0.8  # 80% of available space
+        
+        # Scale detector radii to schematic size
+        bf_r = self.bragg_radius * 0.8 * scale_factor
+        df_inner = self.dark_field_region[2] * scale_factor
+        df_outer = self.dark_field_region[3] * scale_factor
+        haadf_inner = self.haadf_region[2] * scale_factor
+        haadf_outer = self.haadf_region[3] * scale_factor
+        
+        # Create detector elements
+        bf_circle = plt.Circle((center_x, center_y), bf_r, fill=True, alpha=0.3, color='red', label='BF')
+        df_ring = plt.Circle((center_x, center_y), df_outer, fill=False, color='blue', linewidth=3, label='DF')
+        df_inner_circle = plt.Circle((center_x, center_y), df_inner, fill=False, color='blue', linewidth=1, linestyle='--')
+        haadf_ring = plt.Circle((center_x, center_y), haadf_outer, fill=False, color='orange', linewidth=3, label='HAADF')
+        haadf_inner_circle = plt.Circle((center_x, center_y), haadf_inner, fill=False, color='orange', linewidth=1, linestyle='--')
+        
+        # Add patches to axes
+        ax.add_patch(bf_circle)
+        ax.add_patch(df_ring)
+        ax.add_patch(df_inner_circle)
+        ax.add_patch(haadf_ring)
+        ax.add_patch(haadf_inner_circle)
+        ax.plot(center_x, center_y, 'k+', markersize=10, markeredgewidth=2)
+        
+        ax.set_title('Detector Geometry')
+        ax.legend(loc='upper right', fontsize=8)
+        ax.axis('off')
+        
+        return ax
+    
+    def create_composite_image(self, bf_image: np.ndarray, haadf_image: np.ndarray, 
+                              mode: str = 'rgb') -> np.ndarray:
+        """
+        Create composite visualization of multiple virtual detector images.
+        
+        Args:
+            bf_image: Bright field image
+            haadf_image: HAADF image
+            mode: Composite mode ('rgb', 'overlay', 'difference')
+            
+        Returns:
+            Composite image array
+        """
+        # Normalize both images for comparison
+        bf_norm = (bf_image - bf_image.min()) / (bf_image.max() - bf_image.min())
+        haadf_norm = (haadf_image - haadf_image.min()) / (haadf_image.max() - haadf_image.min())
+        
+        if mode == 'rgb':
+            # Create RGB composite: BF=red, HAADF=green
+            composite = np.zeros((*bf_image.shape, 3))
+            composite[..., 0] = bf_norm  # Red channel = BF
+            composite[..., 1] = haadf_norm  # Green channel = HAADF
+            composite[..., 2] = 0.5 * (bf_norm + haadf_norm)  # Blue = average
+        elif mode == 'overlay':
+            # Simple alpha blending
+            composite = 0.6 * bf_norm + 0.4 * haadf_norm
+        elif mode == 'difference':
+            # Show differences between techniques
+            composite = np.abs(bf_norm - haadf_norm)
+        else:
+            raise ValueError(f"Unknown composite mode: {mode}")
+        
+        return composite
+    
+    def create_mean_pattern_comparison(self, figsize=(15, 5)) -> plt.Figure:
+        """
+        Create comparison of mean diffraction patterns (linear vs log scale).
+        
+        Args:
+            figsize: Figure size tuple
+            
+        Returns:
+            Matplotlib figure object
+        """
+        fig, axes = plt.subplots(1, 3, figsize=figsize)
+        
+        # 1. Mean diffraction pattern with detector regions (linear scale)
+        self.plot_mean_diffraction_pattern(axes[0], show_regions=True, use_log=False, add_scalebar=True)
+        axes[0].set_title('Mean Diffraction Pattern\n(With Detector Regions)')
+        
+        # 2. Mean pattern - log scale
+        mean_pattern = np.mean(np.maximum(self.data, 0), axis=0).astype(np.float32)
+        im = axes[1].imshow(np.log(mean_pattern + 1e-6), cmap='viridis')
+        axes[1].set_title('Mean Pattern (Log Scale)')
+        axes[1].axis('off')
+        cbar = plt.colorbar(im, ax=axes[1], shrink=0.8)
+        cbar.set_label('Intensity (log)', rotation=270, labelpad=15)
+        
+        # 3. Radial profile analysis
+        self.plot_radial_profile(axes[2])
+        
+        plt.tight_layout()
+        return fig
+    
+    def create_virtual_detector_suite(self, figsize=(20, 5)) -> plt.Figure:
+        """
+        Create visualization of all virtual detector images.
+        
+        Args:
+            figsize: Figure size tuple
+            
+        Returns:
+            Matplotlib figure object
+        """
+        fig, axes = plt.subplots(1, 4, figsize=figsize)
+        
+        # 1. Bright field image
+        bf_image = self.create_bright_field_image()
+        im1 = axes[0].imshow(bf_image, cmap='gray')
+        axes[0].set_title('Virtual Bright Field')
+        axes[0].axis('off')
+        cbar1 = plt.colorbar(im1, ax=axes[0], shrink=0.8)
+        cbar1.set_label('Intensity (counts)', rotation=270, labelpad=15)
+        
+        # 2. Dark field image
+        center_y, center_x, inner_radius, outer_radius = self.dark_field_region
+        df_image = self.create_dark_field_image(inner_radius, outer_radius)
+        im2 = axes[1].imshow(df_image, cmap='hot')
+        axes[1].set_title('Virtual Dark Field')
+        axes[1].axis('off')
+        cbar2 = plt.colorbar(im2, ax=axes[1], shrink=0.8)
+        cbar2.set_label('Intensity (counts)', rotation=270, labelpad=15)
+        
+        # 3. HAADF image
+        haadf_image = self.create_haadf_image()
+        im3 = axes[2].imshow(haadf_image, cmap='plasma')
+        axes[2].set_title('Virtual HAADF (Z-contrast)')
+        axes[2].axis('off')
+        cbar3 = plt.colorbar(im3, ax=axes[2], shrink=0.8)
+        cbar3.set_label('Intensity (counts)', rotation=270, labelpad=15)
+        
+        # 4. Composite: BF vs HAADF
+        composite = self.create_composite_image(bf_image, haadf_image, mode='rgb')
+        axes[3].imshow(composite)
+        axes[3].set_title('BF/HAADF Composite\n(Red=BF, Green=HAADF)')
+        axes[3].axis('off')
+        
+        plt.tight_layout()
+        return fig
+    
+    def create_analysis_dashboard(self, figsize=(15, 5)) -> plt.Figure:
+        """
+        Create analysis dashboard with radial profile and detector geometry.
+        
+        Args:
+            figsize: Figure size tuple
+            
+        Returns:
+            Matplotlib figure object
+        """
+        fig, axes = plt.subplots(1, 3, figsize=figsize)
+        
+        # 1. Radial profile analysis
+        self.plot_radial_profile(axes[0])
+        
+        # 2. Detector geometry schematic
+        self.create_detector_schematic(axes[1])
+        
+        # 3. Mean pattern with regions overlay
+        self.plot_mean_diffraction_pattern(axes[2], show_regions=True, use_log=True, add_scalebar=False)
+        axes[2].set_title('Detector Regions Overlay')
+        
+        plt.tight_layout()
+        return fig
+    
+    def create_detector_comparison(self, figsize=(12, 8)) -> plt.Figure:
+        """
+        Create side-by-side comparison of different detector configurations.
+        
+        Args:
+            figsize: Figure size tuple
+            
+        Returns:
+            Matplotlib figure object
+        """
+        fig, axes = plt.subplots(2, 2, figsize=figsize)
+        
+        # Create images
+        bf_image = self.create_bright_field_image()
+        center_y, center_x, inner_radius, outer_radius = self.dark_field_region
+        df_image = self.create_dark_field_image(inner_radius, outer_radius)
+        haadf_image = self.create_haadf_image()
+        
+        # Plot images with consistent colormaps and scaling
+        im1 = axes[0, 0].imshow(bf_image, cmap='gray')
+        axes[0, 0].set_title(f'Bright Field (r≤{self.bragg_radius*0.8:.1f}px)')
+        axes[0, 0].axis('off')
+        plt.colorbar(im1, ax=axes[0, 0], shrink=0.6)
+        
+        im2 = axes[0, 1].imshow(df_image, cmap='hot')
+        axes[0, 1].set_title(f'Dark Field (r={inner_radius:.1f}-{outer_radius:.1f}px)')
+        axes[0, 1].axis('off')
+        plt.colorbar(im2, ax=axes[0, 1], shrink=0.6)
+        
+        im3 = axes[1, 0].imshow(haadf_image, cmap='plasma')
+        haadf_inner, haadf_outer = self.haadf_region[2:4]
+        axes[1, 0].set_title(f'HAADF (r={haadf_inner:.1f}-{haadf_outer:.1f}px)')
+        axes[1, 0].axis('off')
+        plt.colorbar(im3, ax=axes[1, 0], shrink=0.6)
+        
+        # Composite image
+        composite = self.create_composite_image(bf_image, haadf_image, mode='rgb')
+        axes[1, 1].imshow(composite)
+        axes[1, 1].set_title('RGB Composite\n(Red=BF, Green=HAADF)')
+        axes[1, 1].axis('off')
+        
+        plt.tight_layout()
+        return fig
+    
+    def create_comprehensive_visualization(self, figsize=(20, 10), include_metadata=True, 
+                                         metadata=None) -> plt.Figure:
+        """
+        Create comprehensive 2x4 visualization layout with all detector types and analysis.
+        
+        This method combines individual visualization components for a complete overview.
+        For more focused visualizations, use the individual methods:
+        - create_mean_pattern_comparison()
+        - create_virtual_detector_suite()  
+        - create_analysis_dashboard()
+        - create_detector_comparison()
+        
+        Args:
+            figsize: Figure size tuple
+            include_metadata: Whether to include metadata text
+            metadata: Optional metadata dictionary
+            
+        Returns:
+            Matplotlib figure object
+        """
+        fig, axes = plt.subplots(2, 4, figsize=figsize)
+        
+        # Row 1: Mean patterns and analysis
+        # 1. Mean diffraction pattern with detector regions (linear scale)
+        self.plot_mean_diffraction_pattern(axes[0, 0], show_regions=True, use_log=False, add_scalebar=True)
+        axes[0, 0].set_title('Mean Diffraction Pattern\n(With Detector Regions)')
+        
+        # 2. Radial profile analysis
+        self.plot_radial_profile(axes[0, 1])
+        
+        # 3. Mean pattern - log scale
+        mean_pattern = np.mean(np.maximum(self.data, 0), axis=0).astype(np.float32)
+        im2 = axes[0, 2].imshow(np.log(mean_pattern + 1e-6), cmap='viridis')
+        axes[0, 2].set_title('Mean Pattern (Log Scale)')
+        axes[0, 2].axis('off')
+        cbar2 = plt.colorbar(im2, ax=axes[0, 2], shrink=0.6)
+        cbar2.set_label('Intensity (log)', rotation=270, labelpad=15)
+        
+        # 4. Detector geometry schematic
+        self.create_detector_schematic(axes[0, 3])
+        
+        # Row 2: Virtual images from all detector types
+        # 1. Bright field image
+        bf_image = self.create_bright_field_image()
+        im3 = axes[1, 0].imshow(bf_image, cmap='gray')
+        axes[1, 0].set_title('Virtual Bright Field')
+        axes[1, 0].axis('off')
+        cbar3 = plt.colorbar(im3, ax=axes[1, 0], shrink=0.6)
+        cbar3.set_label('Intensity (counts)', rotation=270, labelpad=15)
+        
+        # 2. Conventional Dark field image
+        df_image = self.create_dark_field_image(*self.dark_field_region[2:4])
+        im4 = axes[1, 1].imshow(df_image, cmap='hot')
+        axes[1, 1].set_title('Virtual Dark Field')
+        axes[1, 1].axis('off')
+        cbar4 = plt.colorbar(im4, ax=axes[1, 1], shrink=0.6)
+        cbar4.set_label('Intensity (counts)', rotation=270, labelpad=15)
+        
+        # 3. HAADF image
+        haadf_image = self.create_haadf_image()
+        im5 = axes[1, 2].imshow(haadf_image, cmap='plasma')
+        axes[1, 2].set_title('Virtual HAADF (Z-contrast)')
+        axes[1, 2].axis('off')
+        cbar5 = plt.colorbar(im5, ax=axes[1, 2], shrink=0.6)
+        cbar5.set_label('Intensity (counts)', rotation=270, labelpad=15)
+        
+        # 4. Composite: BF vs HAADF
+        composite = self.create_composite_image(bf_image, haadf_image, mode='rgb')
+        axes[1, 3].imshow(composite)
+        axes[1, 3].set_title('BF/HAADF Composite\n(Red=BF, Green=HAADF)')
+        axes[1, 3].axis('off')
+        
+        # Add metadata and statistics if requested
+        if include_metadata:
+            if metadata:
+                info_text = []
+                if 'original_shape' in metadata:
+                    info_text.append(f"Original: {metadata['original_shape']}")
+                if 'compression_ratio' in metadata:
+                    info_text.append(f"Compression: {metadata['compression_ratio']:.1f}x")
+                if 'normalization_method' in metadata:
+                    info_text.append(f"Norm: {metadata['normalization_method']}")
+                    
+                if info_text:
+                    fig.suptitle(' | '.join(info_text), y=0.02, fontsize=10)
+            
+            # Add statistics
+            stats_text = f"Data: {self.data.shape} | Range: [{self.data.min():.1f}, {self.data.max():.1f}] | Direct beam: {self.direct_beam_position}"
+            fig.suptitle(stats_text, y=0.98, fontsize=10)
+        
+        # Improve spacing between subplots
+        plt.tight_layout()
+        plt.subplots_adjust(top=0.90, bottom=0.08, hspace=0.3, wspace=0.25)
+        
+        return fig
+    
+    def interactive_beam_center_detection(self) -> Tuple[Tuple[int, int], float]:
+        """
+        Interactive beam center and radius detection.
+        Click 1: Center of the direct beam
+        Click 2: Edge of the direct beam disc (for radius measurement)
+        
+        Returns:
+            Tuple of ((center_y, center_x), radius)
+        """
+        import matplotlib.pyplot as plt
+        from matplotlib.widgets import Button
+        
+        # Calculate mean pattern
+        mean_pattern = np.mean(np.maximum(self.data, 0), axis=0)
+        
+        # Interactive click detection
+        clicks = []
+        center_pos = None
+        radius = None
+        
+        def onclick(event):
+            nonlocal center_pos, radius
+            if event.inaxes is None or event.button != 1:  # Only left mouse button
+                return
+                
+            x, y = int(round(event.xdata)), int(round(event.ydata))
+            clicks.append((y, x))  # Store as (row, col) = (y, x)
+            
+            print(f"Click {len(clicks)}: Position ({y}, {x})")
+            
+            if len(clicks) == 1:
+                # First click: beam center
+                center_pos = (y, x)
+                ax.plot(x, y, 'r+', markersize=20, markeredgewidth=3, label='Beam Center')
+                ax.plot(x, y, 'w+', markersize=16, markeredgewidth=2)
+                ax.legend()
+                fig.canvas.draw()
+                print("Click on the edge of the direct beam disc to set radius...")
+                
+            elif len(clicks) == 2:
+                # Second click: edge for radius calculation
+                center_y, center_x = center_pos
+                
+                # Calculate radius
+                radius = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+                
+                # Draw circle showing the detected region
+                from matplotlib.patches import Circle
+                circle = Circle((center_x, center_y), radius, 
+                              fill=False, edgecolor='red', linewidth=2, linestyle='--')
+                ax.add_patch(circle)
+                ax.plot(x, y, 'ro', markersize=8, label=f'Edge (r={radius:.1f}px)')
+                ax.legend()
+                fig.canvas.draw()
+                
+                print(f"Beam center: ({center_y}, {center_x})")
+                print(f"Detected radius: {radius:.1f} pixels")
+                print("Auto-closing window...")
+                
+                # Auto-close immediately after detection
+                plt.close(fig)
+                return  # Exit the onclick function early
+        
+        def on_done(_):
+            plt.close(fig)
+        
+        # Create interactive plot
+        fig, ax = plt.subplots(figsize=(10, 10))
+        
+        # Show mean pattern in log scale for better visibility
+        im = ax.imshow(np.log(mean_pattern + 1e-6), cmap='viridis')
+        ax.set_title('Interactive Beam Center Detection\n1. Click beam center\n2. Click beam edge')
+        plt.colorbar(im, ax=ax, shrink=0.6)
+        
+        # Add done button
+        ax_button = plt.axes([0.81, 0.01, 0.08, 0.05])
+        button = Button(ax_button, 'Done')
+        button.on_clicked(on_done)
+        
+        # Connect click event
+        fig.canvas.mpl_connect('button_press_event', onclick)
+        
+        print("Interactive beam center detection:")
+        print("1. Click on the CENTER of the direct beam")
+        print("2. Click on the EDGE of the direct beam disc")
+        print("Window will auto-close after second click")
+        
+        # Use blocking show - simpler and more reliable
+        plt.show()
+        
+        # Force close all figures to ensure cleanup
+        plt.close('all')
+        
+        # Validate results
+        if center_pos is None:
+            print("Warning: No center position detected, using pattern center")
+            center_pos = (self.pattern_shape[0] // 2, self.pattern_shape[1] // 2)
+        
+        if radius is None:
+            print("Warning: No radius detected, using default estimate")
+            radius = min(self.pattern_shape) // 8
+        
+        print(f"Interactive detection returning: center={center_pos}, radius={radius:.1f}")
+        return center_pos, radius
+    
+    def apply_interactive_detection(self):
+        """Apply interactive beam center detection and update internal parameters."""
+        center_pos, radius = self.interactive_beam_center_detection()
+        
+        # Update internal parameters
+        self.direct_beam_position = center_pos
+        self.bragg_radius = radius
+        
+        # Force recalculation of cached indices
+        self.y_indices, self.x_indices = np.indices(self.pattern_shape)
+        
+        # Recalculate detector regions with new parameters
+        self.bright_field_region = self._default_bright_field_region()
+        self.dark_field_region = self._default_dark_field_region()
+        self.haadf_region = self._default_haadf_region()
+        
+        print(f"Updated STEMVisualizer with interactive detection results")
+        print(f"Center: {self.direct_beam_position}, Radius: {self.bragg_radius:.1f}")
+    
     def _add_scalebar(self, ax, pattern_scale=False):
-        """Add scalebar to the plot following m3_learning style."""
+        """Add simple, clean scalebar to the plot."""
         if pattern_scale:
-            # For diffraction patterns - typically in reciprocal space
-            scale_size = 20  # Example: 20 pixels
-            scale_length = 1.0  # Example: 1.0 nm⁻¹
-            units = "nm⁻¹"
-            image_size = max(self.pattern_shape)
+            # For diffraction patterns - reciprocal space units
+            pattern_size = min(self.pattern_shape)
+            scale_pixels = max(20, pattern_size // 10)  # Adaptive size
+            # Convert pixels to reciprocal space units (nm^-1)
+            # Assuming typical STEM detector calibration: ~0.01 nm^-1 per pixel
+            reciprocal_scale = scale_pixels * 0.01
+            scale_length = f"{reciprocal_scale:.2f} nm⁻¹"
+            image_size = pattern_size
         else:
             # For real space images
-            scale_size = self.scalebar_info['scale_length']
-            scale_length = scale_size
-            units = self.scalebar_info['units']
+            scale_pixels = self.scalebar_info['scale_length'] 
+            scale_length = f"{scale_pixels} {self.scalebar_info['units']}"
             image_size = self.scalebar_info['width']
         
         # Get axis limits
         x_lim, y_lim = ax.get_xlim(), ax.get_ylim()
-        x_size = int(np.abs(x_lim[1] - x_lim[0]))
-        y_size = int(np.abs(y_lim[1] - y_lim[0]))
+        x_size = abs(x_lim[1] - x_lim[0])
+        y_size = abs(y_lim[1] - y_lim[0])
         
-        # Calculate scalebar position (bottom right)
-        fract = scale_size / image_size
-        x_start = x_lim[0] + 0.9 * x_size
-        x_end = x_lim[0] + (0.9 - fract) * x_size
-        y_start = y_lim[0] + 0.1 * y_size
-        y_end = y_lim[0] + 0.125 * y_size
-        y_label = y_lim[0] + 0.175 * y_size
+        # Calculate scalebar position (bottom left to avoid legend conflict)
+        margin_x = 0.05  # 5% margin from edges
+        margin_y = 0.08  # 8% margin from bottom
         
-        # Draw scalebar
-        ax.plot([x_end, x_start], [y_start, y_start], 'w-', linewidth=3)
-        ax.plot([x_end, x_start], [y_start, y_start], 'k-', linewidth=1)
-        ax.plot([x_end, x_end], [y_start, y_end], 'w-', linewidth=3)
-        ax.plot([x_end, x_end], [y_start, y_end], 'k-', linewidth=1)
-        ax.plot([x_start, x_start], [y_start, y_end], 'w-', linewidth=3)
-        ax.plot([x_start, x_start], [y_start, y_end], 'k-', linewidth=1)
+        # Scalebar length as fraction of image
+        bar_length_frac = scale_pixels / image_size if image_size > 0 else 0.15
+        bar_length_frac = min(bar_length_frac, 0.25)  # Cap at 25% of image width
         
-        # Add text label
-        ax.text((x_start + x_end) / 2, y_label, f"{scale_length} {units}",
-                ha='center', va='bottom', color='white', fontsize=10, weight='bold',
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.7))
+        # Position scalebar (bottom left)
+        bar_width = bar_length_frac * x_size
+        x_start = x_lim[0] + margin_x * x_size
+        x_end = x_start + bar_width
+        y_bar = y_lim[0] + margin_y * y_size
+        
+        # Simple, clean scalebar design
+        bar_thickness = 3
+        
+        # Main bar (white with black outline)
+        ax.plot([x_start, x_end], [y_bar, y_bar], 'white', linewidth=bar_thickness+2, solid_capstyle='round')
+        ax.plot([x_start, x_end], [y_bar, y_bar], 'black', linewidth=bar_thickness, solid_capstyle='round')
+        
+        # Simple end ticks
+        tick_height = 4
+        ax.plot([x_start, x_start], [y_bar - tick_height/2, y_bar + tick_height/2], 'white', linewidth=bar_thickness+1)
+        ax.plot([x_start, x_start], [y_bar - tick_height/2, y_bar + tick_height/2], 'black', linewidth=bar_thickness-1)
+        ax.plot([x_end, x_end], [y_bar - tick_height/2, y_bar + tick_height/2], 'white', linewidth=bar_thickness+1)
+        ax.plot([x_end, x_end], [y_bar - tick_height/2, y_bar + tick_height/2], 'black', linewidth=bar_thickness-1)
+        
+        # Simple text label with better spacing to avoid overlap
+        label_y = y_bar + tick_height/2 + 0.035 * y_size  # Increased spacing
+        ax.text((x_start + x_end) / 2, label_y, scale_length,
+                ha='center', va='bottom', color='white', fontsize=8, weight='bold',
+                bbox=dict(boxstyle='round,pad=0.15', facecolor='black', alpha=0.7))
 
     def plot_mean_diffraction_pattern(self, ax=None, show_regions=True, use_log=True, add_scalebar=False):
         """Plot mean diffraction pattern with field regions."""
         if ax is None:
             fig, ax = plt.subplots(figsize=(8, 8))
         
-        # Use log data for visualization
-        if use_log and hasattr(self, 'log_data'):
-            mean_pattern = np.mean(self.log_data, axis=0)
-        else:
-            mean_pattern = np.mean(self.data, axis=0)
+        # Use log scale for visualization, calculated on-demand to avoid storing extra data
+        mean_pattern = np.mean(np.maximum(self.data, 0), axis=0).astype(np.float32)
+        if use_log:
+            mean_pattern = np.log(mean_pattern + 1e-6)
             
         im = ax.imshow(mean_pattern, cmap='viridis')
         ax.set_title('Mean Diffraction Pattern')
         ax.axis('off')
         
         if show_regions:
-            # Mark direct beam position and Bragg radius
+            # Mark direct beam position with refined crosshair
             y_beam, x_beam = self.direct_beam_position
-            ax.plot(x_beam, y_beam, 'w+', markersize=15, markeredgewidth=3)
-            ax.plot(x_beam, y_beam, 'k+', markersize=12, markeredgewidth=2)
+            
+            # Smaller, cleaner crosshair
+            cross_size = min(self.pattern_shape) // 25  # Adaptive size
+            ax.plot([x_beam - cross_size, x_beam + cross_size], [y_beam, y_beam], 
+                   'white', linewidth=2.5, solid_capstyle='round', label='Beam Center')
+            ax.plot([x_beam, x_beam], [y_beam - cross_size, y_beam + cross_size], 
+                   'white', linewidth=2.5, solid_capstyle='round')
+            ax.plot([x_beam - cross_size, x_beam + cross_size], [y_beam, y_beam], 
+                   'black', linewidth=1.5, solid_capstyle='round')
+            ax.plot([x_beam, x_beam], [y_beam - cross_size, y_beam + cross_size], 
+                   'black', linewidth=1.5, solid_capstyle='round')
             
             # Show Bragg spot radius for reference
             from matplotlib.patches import Circle
             bragg_circle = Circle((x_beam, y_beam), self.bragg_radius,
-                                fill=False, edgecolor='yellow', linewidth=1, linestyle=':')
+                                fill=False, edgecolor='yellow', linewidth=1.5, linestyle=':', 
+                                label='Bragg radius')
             ax.add_patch(bragg_circle)
-            ax.text(x_beam + self.bragg_radius + 5, y_beam - self.bragg_radius/2, 
-                   f'Bragg\nr={self.bragg_radius:.1f}', color='yellow', fontsize=8, weight='bold')
             
             # Bright field region (circular)
             bf_radius = self.bragg_radius * 0.8  # Default BF radius
             bf_circle = Circle((x_beam, y_beam), bf_radius,
-                             fill=False, edgecolor='red', linewidth=2)
+                             fill=False, edgecolor='red', linewidth=2,
+                             label='BF detector')
             ax.add_patch(bf_circle)
-            ax.text(x_beam - bf_radius - 15, y_beam, 'BF', color='red', fontsize=12, weight='bold')
             
             # Conventional Dark field region (annular around Bragg spots)
             center_y, center_x, inner_radius, outer_radius = self.dark_field_region
             inner_circle = Circle((center_x, center_y), inner_radius, 
-                                fill=False, edgecolor='blue', linewidth=2, linestyle='--')
+                                fill=False, edgecolor='blue', linewidth=1.5, linestyle='--')
             outer_circle = Circle((center_x, center_y), outer_radius,
-                                fill=False, edgecolor='blue', linewidth=2)
+                                fill=False, edgecolor='blue', linewidth=2,
+                                label='DF detector')
             ax.add_patch(inner_circle)
             ax.add_patch(outer_circle)
-            ax.text(center_x + outer_radius + 5, center_y + outer_radius/2, 'DF', 
-                   color='blue', fontsize=12, weight='bold')
             
             # HAADF region (high-angle annular)
             haadf_center_y, haadf_center_x, haadf_inner, haadf_outer = self.haadf_region
             haadf_inner_circle = Circle((haadf_center_x, haadf_center_y), haadf_inner,
-                                      fill=False, edgecolor='orange', linewidth=2, linestyle='--')
+                                      fill=False, edgecolor='orange', linewidth=1.5, linestyle='--')
             haadf_outer_circle = Circle((haadf_center_x, haadf_center_y), haadf_outer,
-                                      fill=False, edgecolor='orange', linewidth=2)
+                                      fill=False, edgecolor='orange', linewidth=2,
+                                      label='HAADF detector')
             ax.add_patch(haadf_inner_circle)
             ax.add_patch(haadf_outer_circle)
-            ax.text(haadf_center_x + haadf_outer + 5, haadf_center_y - haadf_outer/2, 'HAADF',
-                   color='orange', fontsize=12, weight='bold')
+            
+            # Add compact legend with detector information - moved further down
+            ax.legend(loc='lower right', fontsize=5, framealpha=0.9, 
+                     bbox_to_anchor=(0.98, -0.02), markerscale=0.6)
         
         if add_scalebar:
             self._add_scalebar(ax, pattern_scale=True)

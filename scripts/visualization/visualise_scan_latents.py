@@ -1,29 +1,35 @@
 #!/usr/bin/env python
 """
-Make a mosaic:
+Make a mosaic showing both BF and DF virtual detectors:
 
-    • panel 0  : raw-average image (grayscale)
-    • panel 1  : virtual detector image (BF or DF)
-    • panel 2+ : each latent channel overlaid on that background
+    • panel 0  : virtual bright field image (grayscale)
+    • panel 1  : virtual dark field image (grayscale) 
+    • panel 2+ : each latent channel overlaid on the bright field background
 
-Usage - default bright-field virtual detector
---------------------------------------------
+Usage - dual detector visualization with interactive center detection
+---------------------------------------------------------------------
 python scripts/visualise_scan_latents.py \
        --raw      data/patterns.h5 \         # .pt, .h5, .npy, or .npz supported
        --latents  outputs/embeddings.npz \   # .pt, .npy, or .npz supported
        --scan     512 512 \
-       --virtual  bf             # or df
        --lat_max_cols 6          # grid width for latent maps
        --outfig   outputs/latent_mosaic.png
+
+For batch processing (no interactive GUI):
+-----------------------------------------
+python … --no-interactive
 
 If your converter stored coordinates:
 -------------------------------------
 python … --coords data/coords.npy  # shape (N,2) float32 (y,x)
 
-Tune radial masks (fractions of max radius):
--------------------------------------------
---bf_radius 0.1        # <10% central disk
---df_inner  0.2 --df_outer 1.0
+Advanced: Custom detector parameters (overrides physics-informed defaults):
+--------------------------------------------------------------------------
+--bf_radius 0.1        # <10% central disk (fraction of pattern size)
+--df_inner  0.2 --df_outer 1.0  # annular ring fractions
+
+Note: By default, physics-informed detector positioning is used based on 
+automatic Bragg spot detection and interactive beam center refinement.
 """
 import argparse, numpy as np, torch
 from pathlib import Path
@@ -88,17 +94,7 @@ def load_tensor(path: Path) -> np.ndarray:
         raise ValueError(f"Unknown file type {path.suffix}. Supported: .pt, .pth, .npy, .npz, .h5, .hdf5")
 
 
-def radial_mask(shape: tuple[int, int], r_min: float, r_max: float) -> np.ndarray:
-    """Build a boolean ring mask in normalised radius units (0…1)."""
-    qy, qx = shape
-    y, x = np.ogrid[:qy, :qx]
-    cy, cx = (qy - 1) / 2, (qx - 1) / 2
-    r = np.sqrt(((y - cy) / cy) ** 2 + ((x - cx) / cx) ** 2)
-    return (r >= r_min) & (r < r_max)
-
-
-# Virtual detector functionality is now handled directly by STEMVisualizer in main()
-# This eliminates the need for wrapper functions and import complexity
+# Virtual detector functionality is handled by STEMVisualizer
 
 
 # ───────────────────────────── CLI ─────────────────────────────
@@ -112,12 +108,16 @@ def parse():
                    help="Scan grid dimensions (optional - will auto-detect if not provided)")
     p.add_argument("--coords", type=Path,
                    help="Optional .npy (N,2) (y,x) coordinates for irregular scan")
-    p.add_argument("--virtual", choices=["bf", "df"], default="bf",
-                   help="Virtual bright-field or dark-field")
     p.add_argument("--bf_radius", type=float, default=0.1,
-                   help="BF: radius (0-1) of central disk")
-    p.add_argument("--df_inner", type=float, default=0.2)
-    p.add_argument("--df_outer", type=float, default=1.0)
+                   help="BF: radius (0-1) of central disk (overrides physics-informed default)")
+    p.add_argument("--df_inner", type=float, default=0.2,
+                   help="DF: inner radius (0-1) fraction (overrides physics-informed default)")
+    p.add_argument("--df_outer", type=float, default=1.0,
+                   help="DF: outer radius (0-1) fraction (overrides physics-informed default)")
+    p.add_argument("--interactive-center", action="store_true", default=True,
+                   help="Use interactive beam center detection (default: True)")
+    p.add_argument("--no-interactive", action="store_true", 
+                   help="Disable interactive detection for batch processing")
     p.add_argument("--lat_max_cols", type=int, default=6)
     p.add_argument("--dpi", type=int, default=300)
     p.add_argument("--outfig", type=Path, required=True)
@@ -218,48 +218,45 @@ def main():
     # 2. Build background images ---------------------------------------------
     # raw-average (mean over diffraction pattern)
     # Use sparse mapping instead of reshape (FR-3.1)
-    raw_mean_values = raw.mean(axis=(2, 3)).squeeze() # Remove channel dimension
-    raw_mean = coords_to_sparse_image(coords, raw_mean_values, (Ny, Nx))
+    # Create both BF and DF virtual detector backgrounds
 
-    # virtual detector using STEMVisualizer (proper implementation) --------
-    # Create STEMVisualizer instance
+    # Create virtual detector image using STEMVisualizer
     stem_viz = STEMVisualizer(raw[:, 0], scan_shape=(Ny, Nx))
-    print(f"Direct beam detected at: {stem_viz.direct_beam_position} (y, x)")
     
-    # Generate virtual detector image
-    if args.virtual == "bf":
-        # Calculate appropriate radius in pixels from fractional radius
-        pattern_size = min(raw.shape[-2:])
-        radius_pixels = int(args.bf_radius * pattern_size // 2)
-        virt_image_full = stem_viz.create_bright_field_image(radius=radius_pixels)
-        print(f"Bright field radius: {radius_pixels} pixels ({args.bf_radius:.2f} fraction)")
-    elif args.virtual == "df":
-        # Create custom dark field region based on parameters
-        center_y, center_x = stem_viz.direct_beam_position
-        pattern_size = min(raw.shape[-2:])
-        
-        # Convert fractional radii to pixel radii
-        inner_radius = int(args.df_inner * pattern_size // 2)
-        outer_radius = int(args.df_outer * pattern_size // 2)
-        
-        # Create annular region
-        df_region = (
-            max(0, center_y - outer_radius),
-            min(raw.shape[-2], center_y + outer_radius),
-            max(0, center_x - outer_radius), 
-            min(raw.shape[-1], center_x + outer_radius)
-        )
-        
-        virt_image_full = stem_viz.create_virtual_field_image(df_region)
-        print(f"Dark field region: {df_region} (inner: {inner_radius}px, outer: {outer_radius}px)")
+    # Interactive beam center detection by default
+    use_interactive = args.interactive_center and not args.no_interactive
+    if use_interactive:
+        print("Starting interactive beam center detection...")
+        print("Click center, then edge of beam. Window will close automatically.")
+        try:
+            stem_viz.apply_interactive_detection()
+            print(f"✓ Interactive detection complete: center={stem_viz.direct_beam_position}")
+        except Exception as e:
+            print(f"⚠️ Interactive detection failed ({e}), using automatic detection")
+            use_interactive = False
     
-    # Convert full grid image to sparse mapping if needed
+    if not use_interactive:
+        print(f"Using automatic beam center detection: {stem_viz.direct_beam_position} (y, x)")
+    
+    # Create both BF and DF images using STEMVisualizer
+    print("\nCreating virtual detector backgrounds...")
+    
+    # Create bright field image (for left panel and latent overlays)
+    bf_image_full = stem_viz.create_bright_field_image()
+    
+    # Create dark field image (for right panel)  
+    df_image_full = stem_viz.create_dark_field_image()
+    
+    # Convert full grid images to sparse mapping if needed
     if coord_info['is_complete_grid']:
-        virt_map = virt_image_full
+        bf_map = bf_image_full
+        df_map = df_image_full
     else:
-        # For irregular coordinates, we need to extract values and map sparsely
-        virt_values = virt_image_full.ravel()
-        virt_map = coords_to_sparse_image(coords, virt_values, (Ny, Nx))
+        # For irregular coordinates, extract values and map sparsely
+        bf_values = bf_image_full.ravel()
+        bf_map = coords_to_sparse_image(coords, bf_values, (Ny, Nx))
+        df_values = df_image_full.ravel()
+        df_map = coords_to_sparse_image(coords, df_values, (Ny, Nx))
 
     # 3. Plot mosaic ----------------------------------------------------------
     latent_dim = Z.shape[1]
@@ -273,14 +270,14 @@ def main():
                              sharex=True, sharey=True)
     axes = axes.ravel()
 
-    # Panel 0: raw-average (FR-3.2: handle NaN for sparse scans)
-    axes[0].imshow(raw_mean, cmap="gray")
-    axes[0].set_title("Raw average")
+    # Panel 0: Bright field image (left background)
+    axes[0].imshow(bf_map, cmap="gray")
+    axes[0].set_title("Virtual Bright Field")
     axes[0].axis("off")
 
-    # Panel 1: virtual detector (FR-3.2: handle NaN for sparse scans)
-    axes[1].imshow(virt_map, cmap="gray")
-    axes[1].set_title(f"Virtual {args.virtual.upper()}")
+    # Panel 1: Dark field image (right background)
+    axes[1].imshow(df_map, cmap="gray")
+    axes[1].set_title("Virtual Dark Field")
     axes[1].axis("off")
 
     # empty out other slots in first row if needed
@@ -292,7 +289,6 @@ def main():
         ax = axes[n_cols + k]            # offset by first row
         colour = Z[:, k]
         colour = (colour - colour.min()) / (colour.ptp() + 1e-9)
-        ax.imshow(raw_mean, cmap="gray")
         sc = ax.scatter(coords[:, 1], coords[:, 0], c=colour,
                         cmap="viridis", s=6, alpha=0.9)
         ax.set_title(f"Latent[{k}]")
@@ -312,7 +308,16 @@ def main():
     cbar.set_label("Normalized value", rotation=270, labelpad=20)
     
     plt.savefig(args.outfig, dpi=args.dpi, bbox_inches='tight')
-    print("Saved", args.outfig)
+    
+    # Final summary
+    print(f"\n{'='*60}")
+    print("LATENT VISUALIZATION COMPLETE")
+    print(f"{'='*60}")
+    print(f"Virtual detectors: BF (left) + DF (right) ({'Interactive' if use_interactive else 'Automatic'} center)")
+    print(f"Beam center: {stem_viz.direct_beam_position}")
+    print(f"Latent channels: {latent_dim}")
+    print(f"Output saved: {args.outfig}")
+    print(f"{'='*60}")
 
 
 if __name__ == "__main__":

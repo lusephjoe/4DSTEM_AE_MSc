@@ -267,7 +267,22 @@ def load_model(checkpoint_path: Path, device: torch.device) -> torch.nn.Module:
             
             # Create model and load state
             model = LitAE(latent_dim=latent_dim, lr=1e-3, out_shape=out_shape)
-            model.load_state_dict(checkpoint['state_dict'])
+            
+            # Handle torch.compile() checkpoint keys with _orig_mod prefixes
+            state_dict = checkpoint['state_dict']
+            if any(key.startswith('_orig_mod.') for key in state_dict.keys()):
+                print("✓ Detected compiled model checkpoint, removing _orig_mod prefixes")
+                # Remove _orig_mod. prefixes from all keys
+                cleaned_state_dict = {}
+                for key, value in state_dict.items():
+                    if key.startswith('_orig_mod.'):
+                        new_key = key[10:]  # Remove '_orig_mod.' prefix
+                        cleaned_state_dict[new_key] = value
+                    else:
+                        cleaned_state_dict[key] = value
+                state_dict = cleaned_state_dict
+            
+            model.load_state_dict(state_dict)
             encoder = model.model.encoder
             print("✓ Loaded checkpoint manually")
     
@@ -279,6 +294,19 @@ def load_model(checkpoint_path: Path, device: torch.device) -> torch.nn.Module:
             state = checkpoint["model_state_dict"]
         else:
             state = checkpoint
+        
+        # Handle torch.compile() checkpoint keys with _orig_mod prefixes
+        if any(key.startswith('_orig_mod.') for key in state.keys()):
+            print("✓ Detected compiled model checkpoint, removing _orig_mod prefixes")
+            # Remove _orig_mod. prefixes from all keys
+            cleaned_state = {}
+            for key, value in state.items():
+                if key.startswith('_orig_mod.'):
+                    new_key = key[10:]  # Remove '_orig_mod.' prefix
+                    cleaned_state[new_key] = value
+                else:
+                    cleaned_state[key] = value
+            state = cleaned_state
         
         from models.autoencoder import Encoder
         encoder = Encoder()
