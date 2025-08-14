@@ -906,7 +906,7 @@ def main():
             )
     
     # Create detailed cluster analysis
-    analyzer.create_detailed_cluster_analysis(cluster_labels, clustering_results, args.output_dir)
+    # analyzer.create_detailed_cluster_analysis(cluster_labels, clustering_results, args.output_dir)
     
     # Save results
     analyzer.save_results(cluster_labels, clustering_results, args.output_dir)

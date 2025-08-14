@@ -64,9 +64,7 @@ def parse_args():
     p = argparse.ArgumentParser(description="Generate embeddings from trained 4D-STEM autoencoder")
     
     # Input/output arguments
-    input_group = p.add_mutually_exclusive_group(required=True)
-    input_group.add_argument("--data", type=Path, help="HDF5 data file (.h5) - recommended")
-    input_group.add_argument("--input", type=Path, help="PyTorch tensor file (.pt) - legacy")
+    p.add_argument("--data", type=Path, required=True, help="Data file (.h5, .hdf5, .pt, .pth, .npy, .npz) - auto-detected")
     
     p.add_argument("--checkpoint", type=Path, required=True, 
                    help="Trained model checkpoint (.ckpt for Lightning, .pt for legacy)")
@@ -440,11 +438,15 @@ class BatchOptimizedHDF5Dataset(torch.utils.data.Dataset):
 def load_data(args) -> Tuple[torch.utils.data.DataLoader, Optional[np.ndarray], dict]:
     """Load data and return DataLoader, spatial coordinates, and metadata."""
     
-    if args.data:
-        # HDF5 data (recommended)
-        print(f"Loading HDF5 data from: {args.data}")
+    # Auto-detect data format based on file extension
+    data_path = args.data
+    file_ext = data_path.suffix.lower()
+    
+    if file_ext in {'.h5', '.hdf5'}:
+        # HDF5 data 
+        print(f"Loading HDF5 data from: {data_path}")
         use_normalization = not args.no_normalization
-        base_dataset = HDF5Dataset(args.data, use_normalization=use_normalization)
+        base_dataset = HDF5Dataset(data_path, use_normalization=use_normalization)
         
         # Use batch-optimized dataset for much faster loading
         print(f"🚀 Using batch-optimized HDF5 loading (batch_size={args.batch_size})")
@@ -457,7 +459,7 @@ def load_data(args) -> Tuple[torch.utils.data.DataLoader, Optional[np.ndarray], 
             
             # FR-2.1: Try to get coordinates from HDF5 metadata first
             try:
-                with h5py.File(args.data, 'r') as f:
+                with h5py.File(data_path, 'r') as f:
                     if 'metadata/scan_indices' in f:
                         spatial_coords = f['metadata/scan_indices'][:]
                         print(f"✓ Using ground-truth coordinates from HDF5: {spatial_coords.shape}")
@@ -510,7 +512,7 @@ def load_data(args) -> Tuple[torch.utils.data.DataLoader, Optional[np.ndarray], 
         
         metadata = {
             'data_type': 'hdf5',
-            'data_path': str(args.data),
+            'data_path': str(data_path),
             'use_normalization': use_normalization,
             'total_patterns': len(base_dataset),
             'batch_optimized': isinstance(dataset, BatchOptimizedHDF5Dataset),
@@ -520,10 +522,10 @@ def load_data(args) -> Tuple[torch.utils.data.DataLoader, Optional[np.ndarray], 
             } if hasattr(base_dataset, 'global_log_mean') else None
         }
         
-    else:
-        # Legacy PyTorch tensor data
-        print(f"Loading PyTorch tensor from: {args.input}")
-        data = torch.load(args.input, map_location="cpu", weights_only=False)
+    elif file_ext in {'.pt', '.pth'}:
+        # PyTorch tensor data
+        print(f"Loading PyTorch tensor from: {data_path}")
+        data = torch.load(data_path, map_location="cpu", weights_only=False)
         
         # Sample subset if requested
         if args.n_samples and args.n_samples < len(data):
@@ -534,9 +536,48 @@ def load_data(args) -> Tuple[torch.utils.data.DataLoader, Optional[np.ndarray], 
         spatial_coords = None
         metadata = {
             'data_type': 'pytorch_tensor',
-            'data_path': str(args.input),
+            'data_path': str(data_path),
             'total_patterns': len(dataset)
         }
+        
+    elif file_ext in {'.npy', '.npz'}:
+        # NumPy data
+        print(f"Loading NumPy data from: {data_path}")
+        if file_ext == '.npy':
+            data = np.load(data_path)
+        else:  # .npz
+            data_file = np.load(data_path)
+            # Try common keys
+            if 'data' in data_file:
+                data = data_file['data']
+            elif 'patterns' in data_file:
+                data = data_file['patterns']
+            else:
+                # Use first array
+                keys = list(data_file.keys())
+                data = data_file[keys[0]]
+                print(f"Using array '{keys[0]}' from .npz file")
+        
+        # Convert to tensor and create dataset
+        data_tensor = torch.from_numpy(data).float()
+        if len(data_tensor.shape) == 3:  # Add channel dimension if needed
+            data_tensor = data_tensor.unsqueeze(1)
+        
+        # Sample subset if requested
+        if args.n_samples and args.n_samples < len(data_tensor):
+            indices = np.random.choice(len(data_tensor), args.n_samples, replace=False)
+            data_tensor = data_tensor[indices]
+        
+        dataset = torch.utils.data.TensorDataset(data_tensor)
+        spatial_coords = None
+        metadata = {
+            'data_type': 'numpy',
+            'data_path': str(data_path),
+            'total_patterns': len(dataset)
+        }
+        
+    else:
+        raise ValueError(f"Unsupported data file format: {file_ext}. Supported formats: .h5, .hdf5, .pt, .pth, .npy, .npz")
     
     if isinstance(dataset, BatchOptimizedHDF5Dataset):
         print(f"Loaded batch-optimized dataset: {len(dataset)} batches ({dataset.total_samples} total samples)")
@@ -607,8 +648,8 @@ def load_data(args) -> Tuple[torch.utils.data.DataLoader, Optional[np.ndarray], 
         loader_creation_time = time.time() - start_loader_time
         print(f"✓ DataLoader created in {loader_creation_time:.2f}s")
         
-        # Test the data loader to catch issues early
-        if num_workers > 0:
+        # Test the data loader to catch issues early (debug mode only)
+        if num_workers > 0 and args.debug:
             print("Testing multiprocessing data loader...")
             test_start = time.time()
             try:
@@ -1067,33 +1108,35 @@ def main():
     if spatial_coords is not None:
         print(f"Spatial coordinates: {spatial_coords.shape}")
     
-    print(f"\nPerformance Summary:")
-    print(f"  Total processing time: {total_time:.2f}s")
-    print(f"  Average throughput: {avg_samples_per_sec:.0f} samples/sec")
-    print(f"  Batch size used: {args.batch_size}")
-    print(f"  Mixed precision: {'Enabled' if use_amp else 'Disabled'}")
-    print(f"  Model compiled: {'Yes' if compiled_successfully else 'No'}")
-    
-    if device.type == "cuda":
-        print(f"\nGPU Memory Summary:")
-        print(f"  Peak allocated: {torch.cuda.max_memory_allocated(device) / 1024**3:.2f} GB")
-        print(f"  Peak cached: {torch.cuda.max_memory_reserved(device) / 1024**3:.2f} GB")
-        print(f"  Current allocated: {torch.cuda.memory_allocated(device) / 1024**3:.2f} GB")
-        print(f"  Current cached: {torch.cuda.memory_reserved(device) / 1024**3:.2f} GB")
-    
-    # System memory usage
-    system_memory = psutil.virtual_memory()
-    print(f"\nSystem Memory Usage:")
-    print(f"  Total: {system_memory.total / 1024**3:.2f} GB")
-    print(f"  Available: {system_memory.available / 1024**3:.2f} GB")
-    print(f"  Used: {system_memory.used / 1024**3:.2f} GB ({system_memory.percent:.1f}%)")
-    
-    print("\nOutput files:")
-    print(f"  Main: {args.output}")
-    if args.output.suffix == '.pt' and spatial_coords is not None:
-        print(f"  Spatial coordinates: {args.output.with_name(args.output.stem + '_coords.npy')}")
-    if args.output.suffix == '.pt' and args.save_metadata:
-        print(f"  Metadata: {args.output.with_name(args.output.stem + '_metadata.json')}")
+    # Performance summary (debug mode only)
+    if args.debug:
+        print(f"\nPerformance Summary:")
+        print(f"  Total processing time: {total_time:.2f}s")
+        print(f"  Average throughput: {avg_samples_per_sec:.0f} samples/sec")
+        print(f"  Batch size used: {args.batch_size}")
+        print(f"  Mixed precision: {'Enabled' if use_amp else 'Disabled'}")
+        print(f"  Model compiled: {'Yes' if compiled_successfully else 'No'}")
+        
+        if device.type == "cuda":
+            print(f"\nGPU Memory Summary:")
+            print(f"  Peak allocated: {torch.cuda.max_memory_allocated(device) / 1024**3:.2f} GB")
+            print(f"  Peak cached: {torch.cuda.max_memory_reserved(device) / 1024**3:.2f} GB")
+            print(f"  Current allocated: {torch.cuda.memory_allocated(device) / 1024**3:.2f} GB")
+            print(f"  Current cached: {torch.cuda.memory_reserved(device) / 1024**3:.2f} GB")
+        
+        # System memory usage
+        system_memory = psutil.virtual_memory()
+        print(f"\nSystem Memory Usage:")
+        print(f"  Total: {system_memory.total / 1024**3:.2f} GB")
+        print(f"  Available: {system_memory.available / 1024**3:.2f} GB")
+        print(f"  Used: {system_memory.used / 1024**3:.2f} GB ({system_memory.percent:.1f}%)")
+        
+        print("\nOutput files:")
+        print(f"  Main: {args.output}")
+        if args.output.suffix == '.pt' and spatial_coords is not None:
+            print(f"  Spatial coordinates: {args.output.with_name(args.output.stem + '_coords.npy')}")
+        if args.output.suffix == '.pt' and args.save_metadata:
+            print(f"  Metadata: {args.output.with_name(args.output.stem + '_metadata.json')}")
     
     print("="*60)
     print("Ready for UMAP analysis! Use:")

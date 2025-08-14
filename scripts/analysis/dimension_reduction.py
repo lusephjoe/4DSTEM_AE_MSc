@@ -302,7 +302,7 @@ class DimensionReducer:
             
             # Heatmap of silhouette scores
             ax = axes[0]
-            pivot_table = results_df.pivot('n_neighbors', 'min_dist', 'silhouette_score')
+            pivot_table = results_df.pivot(index='n_neighbors', columns='min_dist', values='silhouette_score')
             sns.heatmap(pivot_table, annot=True, fmt='.3f', cmap='viridis', ax=ax)
             ax.set_title('Silhouette Score Heatmap')
             ax.set_xlabel('min_dist')

@@ -166,7 +166,7 @@ class ClusterScanVisualizer:
         
         return coords
     
-    def create_cluster_overlay(self, coords, scan_shape, virtual_type='bf', output_dir=Path("cluster_analysis")):
+    def create_cluster_overlay(self, coords, scan_shape, virtual_type='bf', output_dir=Path("cluster_analysis"), use_interactive=True):
         """Create the main cluster overlay visualization."""
         Ny, Nx = scan_shape
         output_dir = Path(output_dir)
@@ -177,29 +177,27 @@ class ClusterScanVisualizer:
         
         # Virtual detector images using STEMVisualizer
         stem_viz = STEMVisualizer(self.raw_data[:, 0], scan_shape=(Ny, Nx))
-        print(f"Direct beam detected at: {stem_viz.direct_beam_position} (y, x)")
+
+        # Interactive beam center detection by default
+        if use_interactive:
+            print("Starting interactive beam center detection...")
+            print("Click center, then edge of beam. Window will close automatically.")
+            try:
+                stem_viz.apply_interactive_detection()
+                print(f"✓ Interactive detection complete: center={stem_viz.direct_beam_position}")
+            except Exception as e:
+                print(f"⚠️ Interactive detection failed ({e}), using automatic detection")
+                use_interactive = False
         
-        # Create bright field image
-        pattern_size = min(self.raw_data.shape[-2:])
-        bf_radius_pixels = int(0.1 * pattern_size // 2)  # Default BF radius
-        bf_image = stem_viz.create_bright_field_image(radius=bf_radius_pixels)
-        
-        # Create dark field image
-        center_y, center_x = stem_viz.direct_beam_position
-        # Create annular dark field region (exclude central bright field)
-        inner_radius = int(0.2 * pattern_size // 2)
-        outer_radius = int(0.8 * pattern_size // 2)
-        
-        # Create mask for annular region
-        df_mask = np.zeros(self.raw_data.shape[-2:], dtype=bool)
-        y_indices, x_indices = np.ogrid[:self.raw_data.shape[-2], :self.raw_data.shape[-1]]
-        distances = np.sqrt((y_indices - center_y)**2 + (x_indices - center_x)**2)
-        df_mask = (distances >= inner_radius) & (distances <= outer_radius)
-        
-        # Apply mask and sum over the annular region
-        df_values = np.sum(self.raw_data[:, 0] * df_mask, axis=(1, 2))
-        df_image = coords_to_sparse_image(coords, df_values, (Ny, Nx))
-        
+        if not use_interactive:
+            print(f"Using automatic beam center detection: {stem_viz.direct_beam_position} (y, x)")
+
+        # Create both BF and DF images using STEMVisualizer
+        print("\nCreating virtual detector backgrounds...")
+        bf_image = stem_viz.create_bright_field_image()
+        df_image = stem_viz.create_dark_field_image()
+
+
         # Use the requested virtual type for the right panel
         if virtual_type == "bf":
             virt_image = bf_image
@@ -476,6 +474,11 @@ def main():
     parser.add_argument("--scan_shape", type=int, nargs=2, required=True,
                        metavar=("NY", "NX"), help="Scan dimensions (height width)")
     
+    parser.add_argument("--interactive-center", action="store_true", default=True,
+                help="Use interactive beam center detection (default: True)")
+    parser.add_argument("--no-interactive", action="store_true", 
+                   help="Disable interactive detection for batch processing")
+    
     args = parser.parse_args()
     
     # Validate inputs
@@ -510,7 +513,7 @@ def main():
     
     # Create visualizations
     valid_clusters, colors = visualizer.create_cluster_overlay(
-        coords, (Ny, Nx), args.virtual, args.output_dir)
+        coords, (Ny, Nx), args.virtual, args.output_dir, use_interactive= args.interactive_center and not args.no_interactive)
     
     visualizer.create_domain_analysis(
         coords, (Ny, Nx), valid_clusters, colors, args.output_dir)
