@@ -116,6 +116,18 @@ With interactive beam center picking:
       --scan-shape 128 128 --interactive-center \
       --out results
 
+With interactive k-space calibration:
+    python scripts/analysis/latent_cluster_polar_map.py \
+      --data patterns.h5 --labels clusters.npy \
+      --scan-shape 128 128 --interactive-kspace \
+      --known-spacing 3.14 --out results
+
+With both interactive modes:
+    python scripts/analysis/latent_cluster_polar_map.py \
+      --data patterns.h5 --labels clusters.npy \
+      --scan-shape 128 128 --interactive-center --interactive-kspace \
+      --known-spacing 2.45 --out results
+
 Configuration options (config.yaml):
     templates:
       top_percent: 10        # Keep top 10% of template values
@@ -141,6 +153,8 @@ Configuration options (config.yaml):
       center_y: null         # Auto-detect beam center if null
       center_x: null
       pixel_size_k: 1.0      # k-space pixel size (1/Å or relative units)
+      pixel_size_ky: null    # Anisotropic k-space calibration (y-axis)
+      pixel_size_kx: null    # Anisotropic k-space calibration (x-axis)
     
     validation:
       enable_split_half: false  # Enable template stability validation
@@ -176,6 +190,44 @@ The script generates a structured output directory:
         run.json                 # Complete run parameters and timing
         config.yaml              # Configuration used
         timings.txt              # Performance breakdown
+
+INTERACTIVE CALIBRATION FEATURES
+=================================
+
+The script provides advanced interactive calibration capabilities:
+
+1. **Interactive Beam Center Picking** (--interactive-center):
+   - Opens a GUI window displaying the mean diffraction pattern
+   - Shows auto-detected center as red dashed crosshairs for reference
+   - Click once to select the desired beam center
+   - Window closes automatically after selection
+   - Updates config and uses selected center for all calculations
+
+2. **Interactive K-space Calibration** (--interactive-kspace):
+   - Enables calibration of k-space pixel sizes by clicking Bragg peaks
+   - Displays mean pattern with log scaling for better peak visibility
+   - Shows guiding circles and beam center marker
+   - Click two opposite Bragg peaks (180° apart) or ring boundaries
+   - Automatically calculates pixel_size_ky and pixel_size_kx
+   - Supports both absolute calibration (with --known-spacing) and relative
+   - Updates config without reloading data for efficient workflow
+
+3. **Combined Interactive Mode**:
+   - Both modes can be used together for complete interactive setup
+   - Center picking happens first, then k-space calibration
+   - All calibration results are saved to config and used immediately
+
+Interactive Calibration Workflow:
+- Use --interactive-center to precisely set beam center by eye
+- Use --interactive-kspace to calibrate against known Bragg reflections
+- Provide --known-spacing X.XX (in Angstroms) for absolute k-space units
+- Without known spacing, relative calibration normalizes selected radius to 1.0
+- Results update the config and are used immediately without data reload
+
+Example with known silicon (220) reflection (d = 1.92 Å):
+    python script.py --data si.h5 --labels clusters.npy \\
+                     --interactive-kspace --known-spacing 1.92 \\
+                     --scan-shape 256 256 --out results
 
 PERFORMANCE AND OPTIMIZATION
 =============================
@@ -303,7 +355,7 @@ class Timer:
     
     def __enter__(self):
         if self.verbose:
-            print(f"⏱️  {self.description}...")
+            print(f"Running {self.description}...")
         self.start_time = time.time()
         return self
     
@@ -311,7 +363,7 @@ class Timer:
         self.end_time = time.time()
         elapsed = self.end_time - self.start_time
         if self.verbose:
-            print(f"✓ {self.description} completed in {elapsed:.2f}s")
+            print(f"Completed {self.description} in {elapsed:.2f}s")
         return False
     
     @property
@@ -380,7 +432,7 @@ class H5Dataset:
             else:
                 raise ValueError(f"Unexpected dataset shape: {self.dataset_shape}")
         
-        print(f"📁 Loaded H5 dataset: {self.dataset_shape} -> scan {scan_shape}, detector {self.Ky}x{self.Kx}")
+        print(f"Loaded H5 dataset: {self.dataset_shape} -> scan {scan_shape}, detector {self.Ky}x{self.Kx}")
     
     def _get_file_handle(self):
         """Get cached file handle, opening if necessary."""
@@ -497,9 +549,9 @@ class Preprocessor:
         if self.background:
             processed = processed - np.mean(processed, axis=0, keepdims=True)
         
-        # Log transform
+        # Log transform using log1p for better accuracy
         if self.log_transform:
-            processed = np.log(processed + 1)
+            processed = np.log1p(processed)
         
         # Apply detector mask
         if self.detector_mask is not None:
@@ -532,7 +584,7 @@ def interactive_beam_center_picker(sample_pattern: np.ndarray, title: str = "Cli
         if event.inaxes and event.button == 1:  # Left mouse button
             center_coords[0] = int(round(event.ydata))
             center_coords[1] = int(round(event.xdata))
-            plt.close()
+            plt.close(fig)  # Close specific figure
     
     # Create figure and display pattern
     fig, ax = plt.subplots(figsize=(8, 8))
@@ -553,7 +605,17 @@ def interactive_beam_center_picker(sample_pattern: np.ndarray, title: str = "Cli
     print(f"Interactive beam center picker opened. Click on the beam center in the displayed pattern.")
     print(f"Auto-detected center is shown as red dashed lines at ({cy_auto}, {cx_auto})")
     
-    plt.show()
+    plt.show(block=True)
+    
+    # Window should already be closed by event handler, but ensure cleanup
+    try:
+        plt.close(fig)
+    except:
+        pass
+    
+    # Small delay to ensure matplotlib cleanup is complete
+    import time
+    time.sleep(0.1)
     
     if center_coords[0] is None:
         print("No center selected, using auto-detected center")
@@ -561,6 +623,167 @@ def interactive_beam_center_picker(sample_pattern: np.ndarray, title: str = "Cli
     
     print(f"Selected beam center: ({center_coords[0]}, {center_coords[1]})")
     return center_coords[0], center_coords[1]
+
+
+def interactive_kspace_calibration(sample_pattern: np.ndarray, center: Tuple[int, int], 
+                                 known_spacing_angstrom: float = None, 
+                                 title: str = "Click opposite Bragg peaks for k-space calibration") -> Tuple[float, float]:
+    """
+    Interactive k-space calibration by clicking opposite Bragg peaks or ring features.
+    
+    Allows the user to click two points (opposite Bragg peaks or ring boundaries) to
+    automatically determine the k-space pixel sizes. If a known d-spacing is provided,
+    calculates absolute calibration; otherwise provides relative calibration.
+    
+    Parameters:
+    -----------
+    sample_pattern : np.ndarray
+        2D diffraction pattern to display for calibration
+    center : Tuple[int, int]
+        Beam center coordinates (cy, cx)
+    known_spacing_angstrom : float, optional
+        Known d-spacing in Angstroms for absolute calibration
+    title : str, optional
+        Window title
+        
+    Returns:
+    --------
+    pixel_size_ky, pixel_size_kx : Tuple[float, float]
+        Calibrated k-space pixel sizes (1/Å or relative units)
+    """
+    clicks = []
+    cy, cx = center
+    
+    def on_click(event):
+        if event.inaxes and event.button == 1:  # Left mouse button
+            y_click = int(round(event.ydata))
+            x_click = int(round(event.xdata))
+            clicks.append((y_click, x_click))
+            
+            # Plot the click
+            ax.plot(x_click, y_click, 'ro', markersize=8)
+            ax.annotate(f'Point {len(clicks)}', (x_click, y_click), 
+                       xytext=(5, 5), textcoords='offset points', color='red', fontweight='bold')
+            
+            if len(clicks) == 1:
+                ax.set_title(f"{title}\nClick the opposite peak (2/2)")
+            elif len(clicks) == 2:
+                # Draw line between points
+                ax.plot([clicks[0][1], clicks[1][1]], [clicks[0][0], clicks[1][0]], 'r-', linewidth=2)
+                ax.set_title("Calibration complete - window will close automatically")
+                
+                # Calculate calibration
+                dy1 = clicks[0][0] - cy
+                dx1 = clicks[0][1] - cx
+                dy2 = clicks[1][0] - cy  
+                dx2 = clicks[1][1] - cx
+                
+                # Distance from center for each point
+                r1 = np.sqrt(dy1**2 + dx1**2)
+                r2 = np.sqrt(dy2**2 + dx2**2)
+                
+                # Average radius (assuming opposite peaks)
+                avg_radius_pixels = (r1 + r2) / 2
+                
+                if known_spacing_angstrom is not None:
+                    # Absolute calibration: k = 1/d, k_pixels = k / pixel_size_k
+                    # So pixel_size_k = k / k_pixels = (1/d) / (radius_pixels)
+                    k_magnitude = 1.0 / known_spacing_angstrom  # 1/Å
+                    pixel_size_k = k_magnitude / avg_radius_pixels
+                    print(f"Absolute calibration: {pixel_size_k:.6f} Å⁻¹/pixel")
+                    print(f"d-spacing: {known_spacing_angstrom:.3f} Å")
+                else:
+                    # Relative calibration: normalize so this radius = 1.0
+                    pixel_size_k = 1.0 / avg_radius_pixels
+                    print(f"Relative calibration: {pixel_size_k:.6f} relative units/pixel")
+                
+                print(f"Average peak radius: {avg_radius_pixels:.1f} pixels")
+                print(f"Individual radii: {r1:.1f}, {r2:.1f} pixels")
+                
+                # Update display 
+                fig.canvas.draw()
+                fig.canvas.flush_events()  # Ensure display updates
+                
+            fig.canvas.draw()
+            
+            if len(clicks) >= 2:
+                # Close window immediately after second click
+                plt.close(fig)
+                return  # Exit event handler after second click
+    
+    def on_key(event):
+        if len(clicks) >= 2:
+            plt.close(fig)  # Close specific figure
+    
+    # Create figure and display pattern
+    fig, ax = plt.subplots(figsize=(10, 10))
+    
+    # Use log scale for better visibility of peaks
+    display_pattern = np.log1p(sample_pattern)
+    im = ax.imshow(display_pattern, cmap='viridis')
+    plt.colorbar(im, ax=ax, label='Log intensity')
+    
+    # Mark the beam center
+    ax.plot(cx, cy, '+', color='white', markersize=15, markeredgewidth=3, label=f'Center ({cy}, {cx})')
+    
+    # Add circles to guide peak selection
+    circle_radii = [20, 40, 60, 80, 100]
+    for radius in circle_radii:
+        if radius < min(sample_pattern.shape) // 2:
+            circle = plt.Circle((cx, cy), radius, fill=False, color='white', alpha=0.3, linestyle='--')
+            ax.add_patch(circle)
+    
+    ax.set_title(f"{title}\nClick the first Bragg peak (1/2)")
+    ax.set_xlabel("X (pixels)")
+    ax.set_ylabel("Y (pixels)")
+    ax.legend()
+    
+    # Connect events
+    fig.canvas.mpl_connect('button_press_event', on_click)
+    fig.canvas.mpl_connect('key_press_event', on_key)
+    
+    print("Interactive k-space calibration:")
+    print("1. Click on a Bragg peak or ring feature")
+    print("2. Click on the opposite peak (180° around center)")
+    if known_spacing_angstrom:
+        print(f"3. Using known d-spacing: {known_spacing_angstrom:.3f} Å")
+    else:
+        print("3. Relative calibration will be computed")
+    
+    plt.show(block=True)
+    
+    # Window should already be closed by event handler, but ensure cleanup
+    try:
+        plt.close(fig)
+    except:
+        pass
+    
+    # Small delay to ensure matplotlib cleanup is complete
+    import time
+    time.sleep(0.1)
+    
+    if len(clicks) < 2:
+        print("Calibration cancelled - insufficient points")
+        return 1.0, 1.0
+    
+    # Calculate final calibration values
+    dy1 = clicks[0][0] - cy
+    dx1 = clicks[0][1] - cx
+    dy2 = clicks[1][0] - cy
+    dx2 = clicks[1][1] - cx
+    
+    r1 = np.sqrt(dy1**2 + dx1**2)
+    r2 = np.sqrt(dy2**2 + dx2**2)
+    avg_radius_pixels = (r1 + r2) / 2
+    
+    if known_spacing_angstrom is not None:
+        pixel_size_k = (1.0 / known_spacing_angstrom) / avg_radius_pixels
+    else:
+        pixel_size_k = 1.0 / avg_radius_pixels
+    
+    # For now, assume isotropic calibration (same for both axes)
+    # Future enhancement could support anisotropic by measuring different directions
+    return pixel_size_k, pixel_size_k
 
 
 class ClusterVirtualDetectors:
@@ -594,10 +817,10 @@ class ClusterVirtualDetectors:
         self.use_gpu = self.device.startswith('cuda') and CUPY_AVAILABLE
         
         if self.use_gpu:
-            print(f"🚀 Using GPU acceleration: {self.device}")
+            print(f"Using GPU acceleration: {self.device}")
             self.xp = cp
         else:
-            print("🖥️  Using CPU computation")
+            print("Using CPU computation")
             self.xp = np
         
         self.templates = {}
@@ -623,7 +846,7 @@ class ClusterVirtualDetectors:
             else:
                 keys = list(data.keys())
                 labels = data[keys[0]]
-                print(f"⚠️  Using '{keys[0]}' as cluster labels")
+                print(f"Warning: Using '{keys[0]}' as cluster labels")
         else:
             raise ValueError(f"Unsupported label format: {labels_path.suffix}")
         
@@ -634,7 +857,7 @@ class ClusterVirtualDetectors:
         
         unique_labels = np.unique(labels)
         n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
-        print(f"📊 Loaded {len(labels)} labels with {n_clusters} clusters")
+        print(f"Loaded {len(labels)} labels with {n_clusters} clusters")
         
         return labels
     
@@ -673,29 +896,34 @@ class ClusterVirtualDetectors:
         unique_clusters = np.unique(labels)
         valid_clusters = [c for c in unique_clusters if c != -1]
         
-        print(f"🔨 Building templates for {len(valid_clusters)} clusters...")
+        print(f"Building templates for {len(valid_clusters)} clusters...")
         
         # Beam center detection with proper priority: config > interactive > auto-detect
         cal = self.config.get('calibration', {})
         cy, cx = cal.get('center_y'), cal.get('center_x')
         interactive_mode = self.config.get('interactive_center', False)
+        interactive_kspace_mode = self.config.get('interactive_kspace', False)
+        known_spacing = self.config.get('known_spacing', None)
+        
+        # Load sample data if needed for detection or calibration
+        sample_frames = None
+        sample_mean = None
+        if (cy is None or cx is None or interactive_mode or interactive_kspace_mode):
+            sample_frames = dataset.load_chunk(0, min(100, dataset.total_frames))
+            sample_mean = np.mean(sample_frames, axis=0).astype(np.float32)
         
         # Priority 1: Use config values if both are specified
         if cy is not None and cx is not None:
-            print(f"🎯 Using beam center from config: ({cy}, {cx})")
+            print(f"Using beam center from config: ({cy}, {cx})")
         else:
-            # Load sample data for detection methods
-            sample_frames = dataset.load_chunk(0, min(100, dataset.total_frames))
-            sample_mean = np.mean(sample_frames, axis=0).astype(np.float32)
-            
             # Priority 2: Interactive mode if enabled and config incomplete
             if interactive_mode:
-                print("🖱️  Interactive beam center picking enabled...")
+                print("Interactive beam center picking enabled...")
                 cy_picked, cx_picked = interactive_beam_center_picker(sample_mean)
                 cy, cx = cy_picked, cx_picked
                 self.config.setdefault('calibration', {})['center_y'] = cy
                 self.config.setdefault('calibration', {})['center_x'] = cx
-                print(f"🎯 Interactively selected beam center: ({cy}, {cx})")
+                print(f"Interactively selected beam center: ({cy}, {cx})")
             else:
                 # Priority 3: Auto-detect missing coordinates
                 cy_det, cx_det = np.unravel_index(np.argmax(ndimage.gaussian_filter(sample_mean, 3)), sample_mean.shape)
@@ -705,12 +933,23 @@ class ClusterVirtualDetectors:
                 if cx is None:
                     cx = int(cx_det)
                     self.config.setdefault('calibration', {})['center_x'] = cx
-                print(f"🎯 Auto-detected beam center: ({cy}, {cx})")
+                print(f"Auto-detected beam center: ({cy}, {cx})")
         
         center = (cy, cx) if cy is not None and cx is not None else None
         
         # Print final center coordinates being used for all calculations
-        print(f"🎯 FINAL BEAM CENTER: ({cy}, {cx}) - This will be used for all calculations")
+        print(f"FINAL BEAM CENTER: ({cy}, {cx}) - This will be used for all calculations")
+        
+        # Interactive k-space calibration if requested
+        if interactive_kspace_mode:
+            print("Interactive k-space calibration enabled...")
+            pixel_size_ky, pixel_size_kx = interactive_kspace_calibration(
+                sample_mean, (cy, cx), known_spacing
+            )
+            # Update config with new calibration
+            self.config.setdefault('calibration', {})['pixel_size_ky'] = pixel_size_ky
+            self.config.setdefault('calibration', {})['pixel_size_kx'] = pixel_size_kx
+            print(f"K-space calibration updated: ky={pixel_size_ky:.6f}, kx={pixel_size_kx:.6f}")
         
         # Initialize preprocessor with detected center
         prep = Preprocessor(self.config.get('preprocess', {}), (dataset.Ky, dataset.Kx), center)
@@ -733,8 +972,11 @@ class ClusterVirtualDetectors:
                 # Apply preprocessing
                 frames = prep(frames)
                 
+                # Promote to float64 for accurate accumulation
                 if self.use_gpu:
-                    frames = self.xp.asarray(frames)
+                    frames = self.xp.asarray(frames, dtype=self.xp.float64)
+                else:
+                    frames = frames.astype(np.float64)
                 
                 # Update global statistics
                 if global_sum is None:
@@ -768,15 +1010,17 @@ class ClusterVirtualDetectors:
                     progress = (chunk_idx + 1) / n_chunks * 100
                     print(f"  Progress: {progress:.1f}%")
         
-        # Compute global statistics
+        # Compute global statistics with stable variance
         self.mu_global = global_sum / total_count
-        global_var = (global_sum_sq / total_count) - (self.mu_global ** 2)
-        self.sigma_global = self.xp.sqrt(global_var + 1e-8)
+        global_mean_sq = self.mu_global ** 2
+        global_ex2 = global_sum_sq / total_count
+        global_var = self.xp.maximum(global_ex2 - global_mean_sq, 0.0)
+        self.sigma_global = self.xp.sqrt(global_var + 1e-12)
         
         # Compute cluster templates
         for c in valid_clusters:
             if cluster_counts[c] == 0:
-                print(f"⚠️  Skipping empty cluster {c}")
+                print(f"Warning: Skipping empty cluster {c}")
                 continue
             
             mu_c = cluster_sums[c] / cluster_counts[c]
@@ -784,11 +1028,12 @@ class ClusterVirtualDetectors:
             # Store true cluster mean
             self.mu_clusters[c] = self.xp.asnumpy(mu_c) if self.use_gpu else mu_c
             
-            # Template: T_c = (mu_c - mu) / (sigma + eps)
-            template = (mu_c - self.mu_global) / (self.sigma_global + 1e-8)
+            # Template: T_c = (mu_c - mu) / (sigma + eps) with scale-aware epsilon
+            eps = 1e-6 * float(self.xp.median(self.sigma_global))
+            template = (mu_c - self.mu_global) / (self.sigma_global + eps)
             
             # L2 normalize template
-            template = template / (np.linalg.norm(template) + 1e-8)
+            template = template / (self.xp.linalg.norm(template) + 1e-12)
             
             # Generate gate from template
             gate = self.generate_gate(template, c)
@@ -806,7 +1051,7 @@ class ClusterVirtualDetectors:
             self.mu_global = self.xp.asnumpy(self.mu_global)
             self.sigma_global = self.xp.asnumpy(self.sigma_global)
         
-        print(f"✓ Built {len(self.templates)} templates")
+        print(f"Built {len(self.templates)} templates")
         
         # Optional split-half validation
         if self.config.get('validation', {}).get('enable_split_half', False):
@@ -886,7 +1131,7 @@ class ClusterVirtualDetectors:
                 if cluster_counts[c] > 0:
                     mu_c = cluster_sums[c] / cluster_counts[c]
                     template = (mu_c - mu_global) / (self.xp.sqrt((mu_c - mu_global)**2 + 1e-8))
-                    template = template / (np.linalg.norm(template) + 1e-8)
+                    template = template / (self.xp.linalg.norm(template) + 1e-12)
                     
                     if self.use_gpu:
                         template = self.xp.asnumpy(template)
@@ -912,17 +1157,17 @@ class ClusterVirtualDetectors:
                 valid_pairs += 1
                 
                 if ssim_val < 0.5:
-                    print(f"    ⚠️  Warning: Low SSIM for cluster {c} suggests unstable template")
+                    print(f"    Warning: Low SSIM for cluster {c} suggests unstable template")
         
         if valid_pairs > 0:
             mean_ssim = total_ssim / valid_pairs
             print(f"  Mean SSIM: {mean_ssim:.3f}")
             if mean_ssim < 0.5:
-                print("  ⚠️  Warning: Low mean SSIM suggests template overfitting or noise")
+                print("  Warning: Low mean SSIM suggests template overfitting or noise")
             else:
-                print("  ✓ Templates appear stable")
+                print("  Templates appear stable")
         
-        print("✓ Split-half validation completed")
+        print("Split-half validation completed")
     
     def generate_gate(self, template: np.ndarray, cluster_id: int) -> np.ndarray:
         """
@@ -964,10 +1209,22 @@ class ClusterVirtualDetectors:
         top_percent = cfg.get('top_percent', 10)             # keep top 10% by default
         smooth_sigma = cfg.get('smooth_sigma', 1.0)
         rmin, rmax = cfg.get('roi_r', [None, None])          # radial ring in pixels
+        gate_type = cfg.get('gate_type', 'hard')             # 'hard', 'soft', or 'smooth_first'
 
-        # percentile gate
-        thr = np.percentile(template, 100 - top_percent)
-        gate = (template >= thr).astype(np.float32)
+        if gate_type == 'soft':
+            # Soft gates: use template directly as weights without thresholding
+            gate = template.copy()
+            # Normalize to [0,1] range
+            gate = (gate - gate.min()) / (gate.max() - gate.min() + 1e-12)
+        elif gate_type == 'smooth_first':
+            # Smooth template first, then threshold
+            smooth_template = ndimage.gaussian_filter(template, smooth_sigma) if smooth_sigma > 0 else template
+            thr = np.percentile(smooth_template, 100 - top_percent)
+            gate = (smooth_template >= thr).astype(np.float32)
+        else:
+            # Hard gates (original): threshold first, then smooth
+            thr = np.percentile(template, 100 - top_percent)
+            gate = (template >= thr).astype(np.float32)
 
         # symmetrize to preserve odd (kx, ky) moment behavior
         gate = 0.5 * (gate + gate[::-1, ::-1])
@@ -993,7 +1250,8 @@ class ClusterVirtualDetectors:
                 ring *= (rr <= rmax)
             gate *= ring
 
-        if smooth_sigma > 0:
+        # Apply final smoothing only for hard gates (soft/smooth_first already handled)
+        if gate_type == 'hard' and smooth_sigma > 0:
             gate = ndimage.gaussian_filter(gate, smooth_sigma)
 
         gate = np.clip(gate, 0, 1)
@@ -1006,7 +1264,7 @@ class ClusterVirtualDetectors:
     
     def compute_contrast_maps(self, dataset: H5Dataset, labels: np.ndarray, chunk_size: int = 1024) -> Dict[int, np.ndarray]:
         """Compute matched-filter contrast maps for each cluster."""
-        print("🎯 Computing matched-filter contrast maps...")
+        print("Computing matched-filter contrast maps...")
         
         # Get center from config (should be set during template building)
         cal = self.config.get('calibration', {})
@@ -1041,11 +1299,19 @@ class ClusterVirtualDetectors:
                     mu_global = self.mu_global
                     sigma_global = self.sigma_global
                 
-                # Z-score normalization with optional diagonal whitening
-                if self.config.get('preprocess', {}).get('whiten', 'none') == 'diag':
-                    z_frames = (frames - mu_global[None, :, :]) / (sigma_global[None, :, :] + 1e-8)
+                # Z-score normalization with scale-aware epsilon and whitening options
+                eps = 1e-6 * float(self.xp.median(sigma_global))
+                whiten_mode = self.config.get('preprocess', {}).get('whiten', 'none')
+                
+                if whiten_mode == 'diag':
+                    # Diagonal whitening (standard z-score per pixel)
+                    z_frames = (frames - mu_global[None, :, :]) / (sigma_global[None, :, :] + eps)
+                elif whiten_mode == 'none':
+                    # Mean-centering only, no normalization
+                    z_frames = frames - mu_global[None, :, :]
                 else:
-                    z_frames = (frames - mu_global[None, :, :]) / (sigma_global[None, :, :] + 1e-8)
+                    # Default: full z-score normalization 
+                    z_frames = (frames - mu_global[None, :, :]) / (sigma_global[None, :, :] + eps)
                 
                 # Compute contrast for each cluster
                 for c in valid_clusters:
@@ -1069,12 +1335,12 @@ class ClusterVirtualDetectors:
                     progress = (chunk_idx + 1) / n_chunks * 100
                     print(f"  Progress: {progress:.1f}%")
         
-        print(f"✓ Computed contrast maps for {len(valid_clusters)} clusters")
+        print(f"Computed contrast maps for {len(valid_clusters)} clusters")
         return contrast_maps
     
     def compute_argmax_confidence(self, contrast_maps: Dict[int, np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
         """Compute argmax map and confidence from contrast maps."""
-        print("📊 Computing argmax and confidence maps...")
+        print("Computing argmax and confidence maps...")
         
         clusters = list(contrast_maps.keys())
         Ny, Nx = list(contrast_maps.values())[0].shape
@@ -1095,7 +1361,7 @@ class ClusterVirtualDetectors:
         # Confidence (max softmax value)
         confidence_map = np.max(softmax_vals, axis=0)
         
-        print(f"✓ Computed argmax (range: {argmax_map.min()}-{argmax_map.max()}) and confidence (mean: {confidence_map.mean():.3f})")
+        print(f"Computed argmax (range: {argmax_map.min()}-{argmax_map.max()}) and confidence (mean: {confidence_map.mean():.3f})")
         
         return argmax_map, confidence_map
     
@@ -1110,13 +1376,16 @@ class ClusterVirtualDetectors:
             cy, cx = np.unravel_index(np.argmax(ndimage.gaussian_filter(mu, 3)), mu.shape)
             self.config.setdefault('calibration', {})['center_y'] = int(cy)
             self.config.setdefault('calibration', {})['center_x'] = int(cx)
-            print(f"🎯 Auto-detected beam center: ({cy}, {cx})")
+            print(f"Auto-detected beam center: ({cy}, {cx})")
 
-        dk = cal.get('pixel_size_k', 1.0)
-        y = (np.arange(Ky) - cy) * dk
-        x = (np.arange(Kx) - cx) * dk
+        # Support anisotropic pixel sizes and sign conventions
+        dky = cal.get('pixel_size_ky', cal.get('pixel_size_k', 1.0))
+        dkx = cal.get('pixel_size_kx', cal.get('pixel_size_k', 1.0))
+        
+        y = (np.arange(Ky) - cy) * dky
+        x = (np.arange(Kx) - cx) * dkx
         ky_grid, kx_grid = np.meshgrid(y, x, indexing='ij')
-        print(f"📐 Created k-grids: center=({cy}, {cx}), dk={dk}")
+        print(f"Created k-grids: center=({cy}, {cx}), dky={dky}, dkx={dkx}")
         return ky_grid, kx_grid
     
     def compute_dpc_com(self, dataset: H5Dataset, labels: np.ndarray, 
@@ -1179,7 +1448,7 @@ class ClusterVirtualDetectors:
         - Field calibration depends on camera length and experimental geometry
         - Union gating provides maximum signal, adaptive gating maximum specificity
         """
-        print("🧭 Computing DPC/CoM with cluster gating...")
+        print("Computing DPC/CoM with cluster gating...")
         
         dpc_config = self.config.get('dpc', {})
         gate_mode = dpc_config.get('gate_mode', 'union')  # 'union' or 'adaptive'
@@ -1190,13 +1459,30 @@ class ClusterVirtualDetectors:
         com_x = np.zeros((Ny, Nx), dtype=np.float32)
         com_y = np.zeros((Ny, Nx), dtype=np.float32)
         
-        # Precompute radial ring mask
-        rr = np.hypot(ky_grid, kx_grid)
+        # Precompute radial ring mask in pixel coordinates (not k-space units)
+        Ky, Kx = ky_grid.shape
+        cal = self.config.get('calibration', {})
+        cy = cal.get('center_y', Ky//2)
+        cx = cal.get('center_x', Kx//2)
+        if cy is None: 
+            cy = Ky//2
+        if cx is None: 
+            cx = Kx//2
+
+        yy, xx = np.mgrid[:Ky, :Kx]
+        rr_px = np.hypot(yy - cy, xx - cx)
+
         if 'roi' in dpc_config:
             rmin, rmax = dpc_config['roi']
-            ring = ((rmin is None) | (rr >= rmin)) & ((rmax is None) | (rr <= rmax))
+            ring = ((rmin is None) | (rr_px >= rmin)) & ((rmax is None) | (rr_px <= rmax))
         else:
-            ring = np.ones_like(rr, dtype=bool)
+            ring = np.ones_like(rr_px, dtype=bool)
+        
+        # Safety net to catch empty ROI masks
+        cov_ring = float((ring > 0).mean())
+        if cov_ring == 0:
+            print("Warning: DPC ROI ring is empty. Disabling ROI for this run.")
+            ring = np.ones_like(ring, dtype=bool)
 
         # Precompute gate lookup for adaptive mode
         gate_ids = sorted(self.gates.keys())
@@ -1208,7 +1494,12 @@ class ClusterVirtualDetectors:
             for gate in self.gates.values():
                 gate_union = np.maximum(gate_union, gate)
             gate_union = gate_union * ring
-            print(f"  Using union gate (coverage: {np.mean(gate_union > 0.1):.1%})")
+            
+            # Safety check for union gate coverage
+            cov_union = float((gate_union > 0.1).mean())
+            print(f"  Using union gate (coverage: {cov_union:.1%})")
+            if cov_union < 1e-4:
+                print("Warning: Union gate coverage ≈ 0%. Check ROI units (pixels vs k-units) and gating thresholds.")
         
         n_chunks = (dataset.total_frames + chunk_size - 1) // chunk_size
         
@@ -1218,13 +1509,15 @@ class ClusterVirtualDetectors:
                 frames = dataset.load_chunk(start_idx, chunk_size)
                 end_idx = min(start_idx + chunk_size, dataset.total_frames)
                 
+                # Promote to float64 for accurate CoM calculations
                 if self.use_gpu:
-                    frames = self.xp.asarray(frames)
-                    ky_grid_gpu = self.xp.asarray(ky_grid)
-                    kx_grid_gpu = self.xp.asarray(kx_grid)
+                    frames = self.xp.asarray(frames, dtype=self.xp.float64)
+                    ky_grid_gpu = self.xp.asarray(ky_grid, dtype=self.xp.float64)
+                    kx_grid_gpu = self.xp.asarray(kx_grid, dtype=self.xp.float64)
                 else:
-                    ky_grid_gpu = ky_grid
-                    kx_grid_gpu = kx_grid
+                    frames = frames.astype(np.float64)
+                    ky_grid_gpu = ky_grid.astype(np.float64)
+                    kx_grid_gpu = kx_grid.astype(np.float64)
                 
                 chunk_indices = np.arange(start_idx, end_idx)
                 chunk_labels = labels[chunk_indices]
@@ -1250,10 +1543,10 @@ class ClusterVirtualDetectors:
                     com_y[y_coords, x_coords] = com_y_vals
                     
                 elif gate_mode == 'adaptive':
-                    # Vectorized computation for adaptive mode
-                    lbl_idx = np.searchsorted(gate_ids, chunk_labels)
-                    # Handle labels not in gate_ids by clamping to valid range
-                    lbl_idx = np.clip(lbl_idx, 0, len(gate_ids) - 1)
+                    # Vectorized computation for adaptive mode with proper label mapping
+                    id_to_idx = {cid: i for i, cid in enumerate(gate_ids)}
+                    default_idx = 0  # Use first gate as fallback
+                    lbl_idx = np.array([id_to_idx.get(int(lbl), default_idx) for lbl in chunk_labels], dtype=int)
                     
                     chunk_gates = gate_stack[lbl_idx]  # (Nchunk, Ky, Kx)
                     
@@ -1308,7 +1601,7 @@ class ClusterVirtualDetectors:
         E_mag = np.sqrt(Ex**2 + Ey**2)
         E_angle = np.arctan2(Ey, Ex)
         
-        print(f"✓ Computed DPC fields: |E| range [{E_mag.min():.4f}, {E_mag.max():.4f}]")
+        print(f"Computed DPC fields: |E| range [{E_mag.min():.4f}, {E_mag.max():.4f}]")
         
         return {
             'Ex': Ex,
@@ -1322,7 +1615,7 @@ class ClusterVirtualDetectors:
     def save_outputs(self, output_dir: Path, contrast_maps: Dict, argmax_map: np.ndarray, 
                     confidence_map: np.ndarray, dpc_results: Dict):
         """Save all outputs to structured directories."""
-        print("💾 Saving outputs...")
+        print("Saving outputs...")
         
         # Create directory structure
         output_dir = Path(output_dir)
@@ -1365,12 +1658,12 @@ class ClusterVirtualDetectors:
         for name, data in dpc_results.items():
             tifffile.imwrite(output_dir / 'realspace' / f'{name}.tif', data.astype(np.float32))
         
-        print(f"✓ Saved outputs to {output_dir}")
+        print(f"Saved outputs to {output_dir}")
 
 def create_visualizations(output_dir: Path, contrast_maps: Dict, argmax_map: np.ndarray, 
                          confidence_map: np.ndarray, dpc_results: Dict, templates: Dict, gates: Dict):
     """Create publication-ready visualizations."""
-    print("🎨 Creating visualizations...")
+    print("Creating visualizations...")
     
     figures_dir = output_dir / 'figures'
     
@@ -1470,7 +1763,7 @@ def create_visualizations(output_dir: Path, contrast_maps: Dict, argmax_map: np.
     plt.savefig(figures_dir / 'DPC_quiver.png', dpi=300, bbox_inches='tight')
     plt.close()
     
-    print(f"✓ Created visualizations in {figures_dir}")
+    print(f"Created visualizations in {figures_dir}")
 
 def save_provenance(output_dir: Path, args: argparse.Namespace, config: Dict, timings: Dict):
     """Save complete provenance information."""
@@ -1517,7 +1810,7 @@ def save_provenance(output_dir: Path, args: argparse.Namespace, config: Dict, ti
         for operation, duration in timings.items():
             f.write(f"  {operation}: {duration:.2f}s\n")
     
-    print(f"✓ Saved provenance to {logs_dir}")
+    print(f"Saved provenance to {logs_dir}")
 
 def load_config(config_path: Optional[Path]) -> Dict:
     """
@@ -1561,7 +1854,8 @@ def load_config(config_path: Optional[Path]) -> Dict:
         'templates': {
             'top_percent': 10,
             'smooth_sigma': 1.0,
-            'roi_r': [None, None]
+            'roi_r': [None, None],
+            'gate_type': 'hard'  # 'hard', 'soft', or 'smooth_first'
         },
         'matched_filter': {
             'softmax_temp': 2.0
@@ -1570,12 +1864,15 @@ def load_config(config_path: Optional[Path]) -> Dict:
             'gate_mode': 'adaptive',
             'baseline': 'median',
             'roi': [None, None],
-            'field_scale': 1.0
+            'field_scale': 1.0,
+            'baseline_region': [10, 10, 20, 20]  # [x0, y0, w, h] for ROI baseline mode
         },
         'calibration': {
             'center_y': None,
             'center_x': None,
-            'pixel_size_k': 1.0
+            'pixel_size_k': 1.0,
+            'pixel_size_ky': None,  # If None, falls back to pixel_size_k
+            'pixel_size_kx': None   # If None, falls back to pixel_size_k
         },
         'validation': {
             'enable_split_half': False
@@ -1595,9 +1892,9 @@ def load_config(config_path: Optional[Path]) -> Dict:
                     default[key] = value
         
         deep_merge(default_config, user_config)
-        print(f"📋 Loaded configuration from {config_path}")
+        print(f"Loaded configuration from {config_path}")
     else:
-        print("📋 Using default configuration")
+        print("Using default configuration")
     
     return default_config
 
@@ -1621,6 +1918,11 @@ Examples:
         --data patterns.h5 --labels clusters.npy \\
         --scan-shape 128 128 --interactive-center \\
         --out results
+
+    python scripts/analysis/latent_cluster_polar_map.py \\
+        --data patterns.h5 --labels clusters.npy \\
+        --scan-shape 128 128 --interactive-kspace \\
+        --known-spacing 3.14 --out results
         """
     )
     
@@ -1645,6 +1947,10 @@ Examples:
                        help='Chunk size for processing (default: 1024)')
     parser.add_argument('--interactive-center', action='store_true',
                        help='Enable interactive beam center picking (opens GUI window)')
+    parser.add_argument('--interactive-kspace', action='store_true',
+                       help='Enable interactive k-space calibration by clicking Bragg peaks')
+    parser.add_argument('--known-spacing', type=float,
+                       help='Known d-spacing in Angstroms for absolute k-space calibration')
     
     args = parser.parse_args()
     
@@ -1657,17 +1963,20 @@ Examples:
     print("="*80)
     print("DATA-DRIVEN VIRTUAL DETECTORS FOR 4D-STEM POLARISATION MAPPING")
     print("="*80)
-    print(f"📁 Data: {args.data}")
-    print(f"📊 Labels: {args.labels}")
-    print(f"📐 Scan shape: {args.scan_shape[0]} × {args.scan_shape[1]}")
-    print(f"💾 Output: {args.out}")
-    print(f"🖥️  Device: {args.device}")
+    print(f"Data: {args.data}")
+    print(f"Labels: {args.labels}")
+    print(f"Scan shape: {args.scan_shape[0]} × {args.scan_shape[1]}")
+    print(f"Output: {args.out}")
+    print(f"Device: {args.device}")
     print("="*80)
     
     # Load configuration
     config = load_config(args.config)
     config['device'] = args.device  # Override device from CLI
     config['interactive_center'] = args.interactive_center  # Override interactive mode from CLI
+    config['interactive_kspace'] = args.interactive_kspace  # Override k-space calibration from CLI
+    if args.known_spacing:
+        config['known_spacing'] = args.known_spacing  # Override known spacing from CLI
     
     # Initialize timing
     total_timer = Timer("Complete analysis", verbose=False)
@@ -1730,13 +2039,13 @@ Examples:
     print("\n" + "="*80)
     print("ANALYSIS COMPLETED SUCCESSFULLY")
     print("="*80)
-    print(f"🕒 Total time: {total_timer.elapsed:.1f}s")
-    print(f"📂 Results saved to: {args.out}")
+    print(f"Total time: {total_timer.elapsed:.1f}s")
+    print(f"Results saved to: {args.out}")
     print("\nGenerated outputs:")
-    print("  📁 kspace/     - Templates, gates, and mean patterns")
-    print("  📁 realspace/  - Contrast maps and DPC field components")  
-    print("  📁 figures/    - Publication-ready visualizations")
-    print("  📁 logs/       - Configuration and timing information")
+    print("  kspace/     - Templates, gates, and mean patterns")
+    print("  realspace/  - Contrast maps and DPC field components")  
+    print("  figures/    - Publication-ready visualizations")
+    print("  logs/       - Configuration and timing information")
     print("="*80)
 
 if __name__ == "__main__":
