@@ -1,26 +1,117 @@
 #!/usr/bin/env python3
 """
-Clustering Parameter Optimization for Embeddings
+Clustering Parameter Optimization for 4D-STEM Autoencoder Embeddings
 
-Systematically tests clustering parameters for K-means, Spectral clustering, and HDBSCAN to find
-optimal settings based on multiple metrics (silhouette score, calinski-harabasz, etc.).
-Works with both dimension-reduced embeddings (UMAP/PCA) and original latent embeddings.
+This script provides comprehensive clustering optimization for both dimension-reduced embeddings 
+(UMAP/PCA) and original high-dimensional latent embeddings from 4D-STEM autoencoders. It 
+systematically tests multiple clustering algorithms with various parameters to identify optimal 
+settings based on multiple evaluation metrics.
 
-Usage:
-    # For UMAP/PCA reduced embeddings
-    python scripts/analysis/optimize_clustering.py \
-        --reduced_data workspace/proj_data_ds4_l32/visualisations/umap_analysis_nn_50_md_pointzero1/umap_data.npz \
-        --output_dir workspace/proj_data_ds4_l32/visualisations/clustering_optimization \
-        --max_clusters 20 \
+Key Features:
+    - Multi-algorithm optimization: K-means, Spectral clustering, and HDBSCAN
+    - Multiple evaluation metrics: Silhouette score, Calinski-Harabasz index, Davies-Bouldin index
+    - Supports both reduced and original latent embeddings
+    - Comprehensive visualization suite with heatmaps and parameter space exploration
+    - Individual result saving for detailed analysis
+    - Flexible cluster specification (ranges, custom lists)
+    - Performance optimization with subsampling and standardization
+
+Supported Clustering Algorithms:
+    1. K-means: Tests different numbers of clusters (k=2 to max_clusters)
+    2. Spectral Clustering: Graph-based clustering with various cluster counts
+    3. HDBSCAN: Density-based clustering with parameter grid search
+
+Evaluation Metrics:
+    - Silhouette Score: Measures how similar points are to their own cluster vs other clusters
+    - Calinski-Harabasz Index: Ratio of between-cluster to within-cluster dispersion
+    - Davies-Bouldin Index: Average similarity between clusters (lower is better)
+    - Inertia: Within-cluster sum of squares (K-means only)
+
+Input Data Formats:
+    - Reduced embeddings: .npz files with 'umap_embedding', 'reduced_embedding', or 'pca_embedding'
+    - Latent embeddings: .npz, .h5, .pt files with 'embeddings' key
+    - Spatial coordinates: Automatically loaded if available for spatial visualization
+
+Output Files:
+    Main Results:
+        - clustering_optimization.png: Comprehensive parameter optimization plots
+        - best_clustering_results.png: Visualization of optimal clustering results
+        - clustering_optimization_summary.json: Summary of best parameters for each method
+        - {method}_optimization.csv: Detailed results for each tested parameter combination
+    
+    Individual Results (optional):
+        - {method}_individual_results/: Directory containing results for each parameter set
+        - cluster_labels.npy: Cluster assignments for each parameter combination
+        - metrics.json: Detailed metrics for each parameter combination
+        - visualization.png: 2D visualization of clustering result
+
+Usage Examples:
+
+    Basic optimization with UMAP/PCA reduced embeddings:
+    python scripts/analysis/optimize_clustering.py \\
+        --reduced_data workspace/umap_analysis/umap_data.npz \\
+        --output_dir workspace/clustering_optimization \\
+        --max_clusters 20 \\
         --subsample 10000
 
-    # For original latent embeddings (high-dimensional)
-    python scripts/analysis/optimize_clustering.py \
-        --latent_embeddings workspace/proj_data_ds4_l32/outputs/embeddings/ds4_4epoch_embeddings.npz \
-        --output_dir workspace/proj_data_ds4_l32/visualisations/clustering_optimization \
-        --max_clusters 20 \
-        --subsample 10000 \
-        --standardize
+    Optimization with original high-dimensional latent embeddings:
+    python scripts/analysis/optimize_clustering.py \\
+        --latent_embeddings workspace/embeddings/latent_embeddings.npz \\
+        --output_dir workspace/clustering_optimization \\
+        --max_clusters 15 \\
+        --standardize \\
+        --subsample 5000
+
+    Custom cluster specification with specific algorithms:
+    python scripts/analysis/optimize_clustering.py \\
+        --reduced_data workspace/pca_analysis/pca_data.npz \\
+        --output_dir workspace/clustering_custom \\
+        --clusters "2,3,5,8,10-15" \\
+        --skip_hdbscan \\
+        --save_individual
+
+    Large-scale optimization with performance options:
+    python scripts/analysis/optimize_clustering.py \\
+        --latent_embeddings workspace/large_embeddings.npz \\
+        --output_dir workspace/large_clustering \\
+        --clusters "2-10" \\
+        --subsample 20000 \\
+        --standardize \\
+        --no_save_individual
+
+    Testing specific methods only:
+    python scripts/analysis/optimize_clustering.py \\
+        --reduced_data workspace/data.npz \\
+        --output_dir workspace/kmeans_only \\
+        --skip_spectral \\
+        --skip_hdbscan \\
+        --clusters "3,5,7,9,12,15"
+
+Performance Notes:
+    - Use --subsample for large datasets (>50,000 points) to reduce computation time
+    - --standardize is recommended for high-dimensional latent embeddings
+    - HDBSCAN optimization can be slow; consider skipping for initial exploration
+    - Individual result saving creates many files; disable for large parameter sweeps
+    - Spectral clustering memory usage scales quadratically with number of points
+
+Parameter Guidelines:
+    - K-means: Start with max_clusters=20, good for spherical clusters
+    - Spectral: Effective for non-convex clusters, similar parameter range as K-means
+    - HDBSCAN: Automatically determines cluster count, good for noise detection
+    - For latent embeddings: Always use --standardize due to varying feature scales
+    - For reduced embeddings: Standardization usually not necessary
+
+Cluster Specification Format:
+    - Single values: "2,3,5,8" → tests k=[2,3,5,8]
+    - Ranges: "2-10" → tests k=[2,3,4,5,6,7,8,9,10]  
+    - Mixed: "2,5-8,12" → tests k=[2,5,6,7,8,12]
+    - All values must be ≥2
+
+Integration with Other Scripts:
+    - Use with dimension_reduction.py output for reduced embeddings
+    - Use with autoencoder embeddings from generate_embeddings.py
+    - Results can be fed into cluster_scan_visualization.py for spatial analysis
+    - Compatible with latent_cluster_polar_map.py for advanced analysis
 """
 
 import argparse
@@ -510,11 +601,84 @@ class ClusteringOptimizer:
                                         method: str, param_identifier: str, metrics: Dict) -> None:
         """Create visualization for individual clustering result."""
         
-        # For high-dimensional data, create a 2D representation
-        embeddings_2d = self.embeddings
-        if self.embeddings.shape[1] > 2:
+        n_dimensions = self.embeddings.shape[1]
+        
+        if n_dimensions == 1:
+            self._create_1d_clustering_plot(labels, result_dir, method, param_identifier, metrics)
+        elif n_dimensions == 2:
+            self._create_2d_clustering_plot(labels, result_dir, method, param_identifier, metrics)
+        else:
+            # For >2D data, create both a PCA overview and multi-component view
+            self._create_2d_clustering_plot(labels, result_dir, method, param_identifier, metrics, use_pca=True)
+            self._create_multicomponent_clustering_plot(labels, result_dir, method, param_identifier, metrics)
+    
+    def _create_1d_clustering_plot(self, labels: np.ndarray, result_dir: Path, 
+                                  method: str, param_identifier: str, metrics: Dict) -> None:
+        """Create 1D clustering visualization."""
+        fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+        fig.suptitle(f'{method.title()} Clustering: {param_identifier}', fontsize=14, fontweight='bold')
+        
+        # 1D scatter with jitter
+        y_jitter = np.random.normal(0, 0.1, len(self.embeddings))
+        axes[0, 0].scatter(self.embeddings[:, 0], y_jitter, c=labels, cmap='Set1', s=2, alpha=0.7)
+        axes[0, 0].set_title('1D Clustering (with jitter)')
+        axes[0, 0].set_xlabel(f'{self.data_type.split()[0]} 1')
+        axes[0, 0].set_ylabel('Random Jitter')
+        
+        # Histogram by cluster
+        unique_labels = np.unique(labels)
+        for label in unique_labels:
+            mask = labels == label
+            label_name = 'Noise' if label == -1 else f'C{label}'
+            axes[0, 1].hist(self.embeddings[mask, 0], bins=30, alpha=0.6, label=label_name)
+        axes[0, 1].set_title('Distribution by Cluster')
+        axes[0, 1].set_xlabel(f'{self.data_type.split()[0]} 1')
+        axes[0, 1].legend()
+        
+        # Metrics text
+        axes[1, 0].axis('off')
+        metrics_text = f"""
+Clustering Metrics:
+Silhouette Score: {metrics["silhouette_score"]:.3f}
+Calinski-Harabasz: {metrics["calinski_harabasz_score"]:.1f}
+Davies-Bouldin: {metrics["davies_bouldin_score"]:.3f}
+        """
+        axes[1, 0].text(0.1, 0.5, metrics_text, transform=axes[1, 0].transAxes, fontsize=12,
+                        verticalalignment='center')
+        
+        # Cluster summary
+        axes[1, 1].axis('off')
+        cluster_counts = {label: np.sum(labels == label) for label in unique_labels}
+        summary_text = "Cluster Sizes:\\n"
+        for label, count in cluster_counts.items():
+            label_name = 'Noise' if label == -1 else f'Cluster {label}'
+            summary_text += f"{label_name}: {count} points\\n"
+        axes[1, 1].text(0.1, 0.5, summary_text, transform=axes[1, 1].transAxes, fontsize=12,
+                        verticalalignment='center')
+        
+        plt.tight_layout()
+        plot_path = result_dir / f'{method}_{param_identifier}_clustering.png'
+        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+        plt.close()
+    
+    def _create_2d_clustering_plot(self, labels: np.ndarray, result_dir: Path, 
+                                  method: str, param_identifier: str, metrics: Dict, use_pca: bool = False) -> None:
+        """Create 2D clustering visualization."""
+        
+        # Prepare data
+        if use_pca:
             pca = PCA(n_components=2, random_state=42)
             embeddings_2d = pca.fit_transform(self.embeddings)
+            title_suffix = f" (PCA projection from {self.embeddings.shape[1]}D)"
+            xlabel = 'PCA Component 1'
+            ylabel = 'PCA Component 2'
+            filename_suffix = "_pca"
+        else:
+            embeddings_2d = self.embeddings
+            title_suffix = ""
+            xlabel = f'{self.data_type.split()[0]} 1'
+            ylabel = f'{self.data_type.split()[0]} 2'
+            filename_suffix = ""
             
         plt.figure(figsize=(10, 8))
         
@@ -540,24 +704,100 @@ class ClusteringOptimizer:
             plt.scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], c=labels, 
                        cmap='Set1', s=2, alpha=0.7)
         
-        plt.title(f'{method.title()} Clustering: {param_identifier}\\n'
+        plt.title(f'{method.title()} Clustering: {param_identifier}{title_suffix}\\n'
                  f'Silhouette: {metrics["silhouette_score"]:.3f}, '
                  f'CH: {metrics["calinski_harabasz_score"]:.1f}, '
                  f'DB: {metrics["davies_bouldin_score"]:.3f}')
         
-        plt.xlabel('Component 1' if self.embeddings.shape[1] > 2 else f'{self.data_type.split()[0]} 1')
-        plt.ylabel('Component 2' if self.embeddings.shape[1] > 2 else f'{self.data_type.split()[0]} 2')
+        plt.xlabel(xlabel)
+        plt.ylabel(ylabel)
         
         # Only show legend if reasonable number of clusters
         n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
-        if n_clusters <= 10:
+        if n_clusters <= 10 and -1 in unique_labels:
             plt.legend(fontsize=8, markerscale=2)
             
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         
         # Save plot
-        plot_path = result_dir / f'{method}_{param_identifier}_clustering.png'
+        plot_path = result_dir / f'{method}_{param_identifier}_clustering{filename_suffix}.png'
+        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+        plt.close()
+    
+    def _create_multicomponent_clustering_plot(self, labels: np.ndarray, result_dir: Path, 
+                                              method: str, param_identifier: str, metrics: Dict) -> None:
+        """Create multi-component clustering visualization showing all dimensions."""
+        n_dimensions = self.embeddings.shape[1]
+        n_cols = min(6, n_dimensions)  # Max 6 columns for readability
+        n_rows = int(np.ceil(n_dimensions / n_cols))
+        
+        # Create figure with appropriate size
+        fig_w = 4 * n_cols
+        fig_h = 4 * n_rows
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h))
+        fig.suptitle(f'{method.title()} Clustering: {param_identifier} - All Components', 
+                    fontsize=16, fontweight='bold')
+        
+        # Handle axis indexing for different grid configurations
+        if n_rows == 1 and n_cols == 1:
+            # Single subplot
+            axes = [axes]
+        elif n_rows == 1:
+            # Single row, multiple columns
+            axes = axes.flatten()
+        elif n_cols == 1:
+            # Single column, multiple rows  
+            axes = axes.flatten()
+        else:
+            # Multiple rows and columns
+            axes = axes.flatten()
+        
+        # Plot each component
+        for k in range(n_dimensions):
+            ax = axes[k]
+            
+            # Create 1D plot for each component
+            component_values = self.embeddings[:, k]
+            y_jitter = np.random.normal(0, 0.02, len(component_values))
+            
+            # Handle noise points for HDBSCAN
+            unique_labels = np.unique(labels)
+            if -1 in unique_labels:
+                # Plot noise points first
+                noise_mask = labels == -1
+                ax.scatter(component_values[noise_mask], y_jitter[noise_mask], 
+                          c='gray', s=1, alpha=0.3, label='Noise' if k == 0 else "")
+                
+                # Plot clusters
+                cluster_labels = unique_labels[unique_labels != -1]
+                colors = plt.cm.Set1(np.linspace(0, 1, len(cluster_labels)))
+                
+                for i, (label, color) in enumerate(zip(cluster_labels, colors)):
+                    mask = labels == label
+                    ax.scatter(component_values[mask], y_jitter[mask], 
+                              c=[color], s=1, alpha=0.7, 
+                              label=f'C{label}' if k == 0 else "")
+            else:
+                ax.scatter(component_values, y_jitter, c=labels, cmap='Set1', s=1, alpha=0.7)
+            
+            ax.set_title(f'Component {k+1}')
+            ax.set_xlabel(f'{self.data_type.split()[0]} {k+1}')
+            ax.set_ylabel('Jitter')
+            ax.grid(True, alpha=0.3)
+            
+            # Only show legend on first subplot
+            if k == 0 and -1 in unique_labels:
+                n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
+                if n_clusters <= 8:
+                    ax.legend(fontsize=6, markerscale=3)
+        
+        # Hide unused subplots
+        for k in range(n_dimensions, n_rows * n_cols):
+            axes[k].axis('off')
+        
+        plt.tight_layout()
+        plot_path = result_dir / f'{method}_{param_identifier}_clustering_multicomponent.png'
         plt.savefig(plot_path, dpi=150, bbox_inches='tight')
         plt.close()
     
@@ -566,13 +806,26 @@ class ClusteringOptimizer:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        # For high-dimensional data, create a 2D representation for visualization
-        embeddings_2d = self.embeddings
-        if self.embeddings.shape[1] > 2:
-            print("Creating 2D representation for visualization using PCA...")
-            pca = PCA(n_components=2, random_state=42)
-            embeddings_2d = pca.fit_transform(self.embeddings)
-            print(f"✓ PCA for visualization: explained variance = {pca.explained_variance_ratio_.sum():.3f}")
+        n_dimensions = self.embeddings.shape[1]
+        
+        # Always create the main optimization plots (these work for any dimensionality)
+        self._create_optimization_plots(output_dir)
+        
+        # Create best clustering visualizations appropriate for the data dimensionality
+        if n_dimensions == 1:
+            print("Creating 1D clustering visualizations...")
+            self._create_best_clustering_1d(output_dir)
+        elif n_dimensions == 2:
+            print("Creating 2D clustering visualizations...")
+            self._create_best_clustering_2d(output_dir)
+        else:
+            print(f"Creating multi-dimensional clustering visualizations for {n_dimensions}D data...")
+            # For >2D data, create both PCA overview and multi-component views
+            self._create_best_clustering_2d(output_dir, use_pca=True)
+            self._create_best_clustering_multicomponent(output_dir)
+    
+    def _create_optimization_plots(self, output_dir: Path) -> None:
+        """Create the main optimization plots (metric curves, heatmaps, etc.)."""
         
         # Set style
         plt.style.use('default')
@@ -725,80 +978,79 @@ class ClusteringOptimizer:
         print(f"✓ Saved optimization plot: {plot_path}")
         
         plt.close()
-        
-        # Create additional visualization showing best clustering results
-        self._create_best_clustering_visualization(embeddings_2d, output_dir)
     
-    def _create_best_clustering_visualization(self, embeddings_2d: np.ndarray, output_dir: Path) -> None:
-        """Create visualization showing the best clustering results."""
+    def _create_best_clustering_1d(self, output_dir: Path) -> None:
+        """Create 1D clustering visualizations for best results."""
         if not self.results:
             return
         
-        # Count available methods to determine subplot layout
+        # Count available methods
         n_methods = sum([1 for method in ['kmeans', 'spectral', 'hdbscan'] if method in self.results and 'error' not in self.results.get(method, {})])
-        
         if n_methods == 0:
             return
         
-        fig, axes = plt.subplots(1, n_methods, figsize=(n_methods * 7, 6))
+        fig, axes = plt.subplots(n_methods, 2, figsize=(12, n_methods * 4))
         if n_methods == 1:
-            axes = [axes]  # Make it iterable for consistency
-        fig.suptitle(f'Best Clustering Results ({self.data_type.title()} Embeddings)', 
-                    fontsize=16, fontweight='bold')
+            axes = axes.reshape(1, -1)
+        fig.suptitle('Best Clustering Results - 1D Data', fontsize=16, fontweight='bold')
         
         plot_count = 0
         
-        # K-means best result
+        # K-means
         if 'kmeans' in self.results and 'error' not in self.results['kmeans']:
-            ax = axes[plot_count]
+            ax_scatter, ax_hist = axes[plot_count, 0], axes[plot_count, 1]
             best_k = self.results['kmeans']['summary']['best_silhouette']['n_clusters']
             
-            # Re-run best K-means for visualization
             kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=10)
             labels = kmeans.fit_predict(self.embeddings)
             
-            # Plot with 2D representation
-            ax.scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], c=labels, 
-                      cmap='Set1', s=2, alpha=0.7)
-            ax.set_title(f'Best K-means (k={best_k})\n'
-                        f'Silhouette: {self.results["kmeans"]["summary"]["best_silhouette"]["score"]:.3f}')
-            ax.set_xlabel('Component 1' if self.embeddings.shape[1] > 2 else f'{self.data_type.split()[0]} 1')
-            ax.set_ylabel('Component 2' if self.embeddings.shape[1] > 2 else f'{self.data_type.split()[0]} 2')
-            ax.grid(True, alpha=0.3)
+            # 1D scatter with jitter
+            y_jitter = np.random.normal(0, 0.05, len(self.embeddings))
+            ax_scatter.scatter(self.embeddings[:, 0], y_jitter, c=labels, cmap='Set1', s=2, alpha=0.7)
+            ax_scatter.set_title(f'K-means (k={best_k}) - Silhouette: {self.results["kmeans"]["summary"]["best_silhouette"]["score"]:.3f}')
+            ax_scatter.set_xlabel(f'{self.data_type.split()[0]} 1')
+            ax_scatter.set_ylabel('Jitter')
             
-            # Add cluster centers if using 2D embeddings directly
-            if self.embeddings.shape[1] == 2:
-                centers = kmeans.cluster_centers_
-                ax.scatter(centers[:, 0], centers[:, 1], c='black', marker='x', s=100, linewidths=3)
+            # Histogram by cluster
+            for label in np.unique(labels):
+                mask = labels == label
+                ax_hist.hist(self.embeddings[mask, 0], bins=30, alpha=0.6, label=f'C{label}')
+            ax_hist.set_title(f'K-means Distribution')
+            ax_hist.set_xlabel(f'{self.data_type.split()[0]} 1')
+            ax_hist.legend()
             
             plot_count += 1
         
-        # Spectral best result
+        # Spectral
         if 'spectral' in self.results and 'error' not in self.results['spectral']:
-            ax = axes[plot_count]
+            ax_scatter, ax_hist = axes[plot_count, 0], axes[plot_count, 1]
             best_k = self.results['spectral']['summary']['best_silhouette']['n_clusters']
             
-            # Re-run best Spectral for visualization
             spectral = SpectralClustering(n_clusters=best_k, random_state=42, n_init=10)
             labels = spectral.fit_predict(self.embeddings)
             
-            # Plot with 2D representation
-            ax.scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], c=labels, 
-                      cmap='Set2', s=2, alpha=0.7)
-            ax.set_title(f'Best Spectral (k={best_k})\n'
-                        f'Silhouette: {self.results["spectral"]["summary"]["best_silhouette"]["score"]:.3f}')
-            ax.set_xlabel('Component 1' if self.embeddings.shape[1] > 2 else f'{self.data_type.split()[0]} 1')
-            ax.set_ylabel('Component 2' if self.embeddings.shape[1] > 2 else f'{self.data_type.split()[0]} 2')
-            ax.grid(True, alpha=0.3)
+            # 1D scatter with jitter
+            y_jitter = np.random.normal(0, 0.05, len(self.embeddings))
+            ax_scatter.scatter(self.embeddings[:, 0], y_jitter, c=labels, cmap='Set2', s=2, alpha=0.7)
+            ax_scatter.set_title(f'Spectral (k={best_k}) - Silhouette: {self.results["spectral"]["summary"]["best_silhouette"]["score"]:.3f}')
+            ax_scatter.set_xlabel(f'{self.data_type.split()[0]} 1')
+            ax_scatter.set_ylabel('Jitter')
+            
+            # Histogram by cluster
+            for label in np.unique(labels):
+                mask = labels == label
+                ax_hist.hist(self.embeddings[mask, 0], bins=30, alpha=0.6, label=f'C{label}')
+            ax_hist.set_title(f'Spectral Distribution')
+            ax_hist.set_xlabel(f'{self.data_type.split()[0]} 1')
+            ax_hist.legend()
             
             plot_count += 1
         
-        # HDBSCAN best result
+        # HDBSCAN
         if 'hdbscan' in self.results and 'error' not in self.results['hdbscan']:
-            ax = axes[plot_count]
+            ax_scatter, ax_hist = axes[plot_count, 0], axes[plot_count, 1]
             best_params = self.results['hdbscan']['summary']['best_silhouette']
             
-            # Re-run best HDBSCAN for visualization
             clusterer = HDBSCAN(
                 min_cluster_size=best_params['min_cluster_size'],
                 min_samples=best_params['min_samples'],
@@ -806,7 +1058,123 @@ class ClusteringOptimizer:
             )
             labels = clusterer.fit_predict(self.embeddings)
             
-            # Plot with 2D representation
+            # 1D scatter with jitter
+            y_jitter = np.random.normal(0, 0.05, len(self.embeddings))
+            unique_labels = np.unique(labels)
+            colors = plt.cm.Set1(np.linspace(0, 1, len(unique_labels)))
+            
+            for label, color in zip(unique_labels, colors):
+                mask = labels == label
+                if label == -1:
+                    ax_scatter.scatter(self.embeddings[mask, 0], y_jitter[mask], 
+                                     c='gray', s=1, alpha=0.3, label='Noise')
+                else:
+                    ax_scatter.scatter(self.embeddings[mask, 0], y_jitter[mask], 
+                                     c=[color], s=2, alpha=0.7, label=f'C{label}')
+            
+            ax_scatter.set_title(f'HDBSCAN ({best_params["n_clusters"]} clusters) - Silhouette: {best_params["score"]:.3f}')
+            ax_scatter.set_xlabel(f'{self.data_type.split()[0]} 1')
+            ax_scatter.set_ylabel('Jitter')
+            ax_scatter.legend(fontsize=8, markerscale=3)
+            
+            # Histogram by cluster
+            for label in unique_labels:
+                mask = labels == label
+                label_name = 'Noise' if label == -1 else f'C{label}'
+                ax_hist.hist(self.embeddings[mask, 0], bins=30, alpha=0.6, label=label_name)
+            ax_hist.set_title(f'HDBSCAN Distribution')
+            ax_hist.set_xlabel(f'{self.data_type.split()[0]} 1')
+            ax_hist.legend()
+        
+        plt.tight_layout()
+        plot_path = output_dir / 'best_clustering_results_1d.png'
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        print(f"✓ Saved 1D clustering visualization: {plot_path}")
+        plt.close()
+    
+    def _create_best_clustering_2d(self, output_dir: Path, use_pca: bool = False) -> None:
+        """Create 2D clustering visualizations for best results."""
+        if not self.results:
+            return
+        
+        # Prepare data
+        if use_pca:
+            pca = PCA(n_components=2, random_state=42)
+            embeddings_2d = pca.fit_transform(self.embeddings)
+            title_suffix = f" (PCA from {self.embeddings.shape[1]}D)"
+            filename_suffix = "_pca"
+            print(f"✓ PCA for visualization: explained variance = {pca.explained_variance_ratio_.sum():.3f}")
+        else:
+            embeddings_2d = self.embeddings
+            title_suffix = ""
+            filename_suffix = ""
+        
+        # Count available methods
+        n_methods = sum([1 for method in ['kmeans', 'spectral', 'hdbscan'] if method in self.results and 'error' not in self.results.get(method, {})])
+        if n_methods == 0:
+            return
+        
+        fig, axes = plt.subplots(1, n_methods, figsize=(n_methods * 7, 6))
+        if n_methods == 1:
+            axes = [axes]
+        fig.suptitle(f'Best Clustering Results - 2D Data{title_suffix}', fontsize=16, fontweight='bold')
+        
+        plot_count = 0
+        
+        # K-means
+        if 'kmeans' in self.results and 'error' not in self.results['kmeans']:
+            ax = axes[plot_count]
+            best_k = self.results['kmeans']['summary']['best_silhouette']['n_clusters']
+            
+            kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=10)
+            labels = kmeans.fit_predict(self.embeddings)
+            
+            ax.scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], c=labels, cmap='Set1', s=2, alpha=0.7)
+            ax.set_title(f'K-means (k={best_k})\\nSilhouette: {self.results["kmeans"]["summary"]["best_silhouette"]["score"]:.3f}')
+            
+            if use_pca:
+                ax.set_xlabel('PCA Component 1')
+                ax.set_ylabel('PCA Component 2')
+            else:
+                ax.set_xlabel(f'{self.data_type.split()[0]} 1')
+                ax.set_ylabel(f'{self.data_type.split()[0]} 2')
+            
+            ax.grid(True, alpha=0.3)
+            plot_count += 1
+        
+        # Spectral
+        if 'spectral' in self.results and 'error' not in self.results['spectral']:
+            ax = axes[plot_count]
+            best_k = self.results['spectral']['summary']['best_silhouette']['n_clusters']
+            
+            spectral = SpectralClustering(n_clusters=best_k, random_state=42, n_init=10)
+            labels = spectral.fit_predict(self.embeddings)
+            
+            ax.scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], c=labels, cmap='Set2', s=2, alpha=0.7)
+            ax.set_title(f'Spectral (k={best_k})\\nSilhouette: {self.results["spectral"]["summary"]["best_silhouette"]["score"]:.3f}')
+            
+            if use_pca:
+                ax.set_xlabel('PCA Component 1')
+                ax.set_ylabel('PCA Component 2')
+            else:
+                ax.set_xlabel(f'{self.data_type.split()[0]} 1')
+                ax.set_ylabel(f'{self.data_type.split()[0]} 2')
+            
+            ax.grid(True, alpha=0.3)
+            plot_count += 1
+        
+        # HDBSCAN
+        if 'hdbscan' in self.results and 'error' not in self.results['hdbscan']:
+            ax = axes[plot_count]
+            best_params = self.results['hdbscan']['summary']['best_silhouette']
+            
+            clusterer = HDBSCAN(
+                min_cluster_size=best_params['min_cluster_size'],
+                min_samples=best_params['min_samples'],
+                cluster_selection_epsilon=0.0
+            )
+            labels = clusterer.fit_predict(self.embeddings)
+            
             unique_labels = np.unique(labels)
             colors = plt.cm.Set1(np.linspace(0, 1, len(unique_labels)))
             
@@ -819,28 +1187,139 @@ class ClusteringOptimizer:
                     ax.scatter(embeddings_2d[mask, 0], embeddings_2d[mask, 1], 
                              c=[color], s=2, alpha=0.7, label=f'C{label}')
             
-            ax.set_title(f'Best HDBSCAN ({best_params["n_clusters"]} clusters)\n'
-                        f'Silhouette: {best_params["score"]:.3f}')
-            ax.set_xlabel('Component 1' if self.embeddings.shape[1] > 2 else f'{self.data_type.split()[0]} 1')
-            ax.set_ylabel('Component 2' if self.embeddings.shape[1] > 2 else f'{self.data_type.split()[0]} 2')
+            ax.set_title(f'HDBSCAN ({best_params["n_clusters"]} clusters)\\nSilhouette: {best_params["score"]:.3f}')
+            
+            if use_pca:
+                ax.set_xlabel('PCA Component 1')
+                ax.set_ylabel('PCA Component 2')
+            else:
+                ax.set_xlabel(f'{self.data_type.split()[0]} 1')
+                ax.set_ylabel(f'{self.data_type.split()[0]} 2')
+            
             ax.grid(True, alpha=0.3)
             
-            # Only show legend if reasonable number of clusters
-            if best_params["n_clusters"] <= 10:
+            if best_params["n_clusters"] <= 8:
                 ax.legend(fontsize=8, markerscale=2)
         
-        # Hide unused subplots if fewer methods were run
-        for i in range(plot_count, len(axes)):
-            axes[i].set_visible(False)
-        
         plt.tight_layout()
-        
-        # Save plot
-        plot_path = output_dir / 'best_clustering_results.png'
+        plot_path = output_dir / f'best_clustering_results_2d{filename_suffix}.png'
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        print(f"✓ Saved best clustering visualization: {plot_path}")
-        
+        print(f"✓ Saved 2D clustering visualization: {plot_path}")
         plt.close()
+    
+    def _create_best_clustering_multicomponent(self, output_dir: Path) -> None:
+        """Create multi-component clustering visualizations for best results."""
+        if not self.results:
+            return
+        
+        n_dimensions = self.embeddings.shape[1]
+        
+        # Count available methods
+        methods_available = []
+        if 'kmeans' in self.results and 'error' not in self.results['kmeans']:
+            methods_available.append('kmeans')
+        if 'spectral' in self.results and 'error' not in self.results['spectral']:
+            methods_available.append('spectral')
+        if 'hdbscan' in self.results and 'error' not in self.results['hdbscan']:
+            methods_available.append('hdbscan')
+        
+        if not methods_available:
+            return
+        
+        # Create separate plots for each method
+        for method in methods_available:
+            n_cols = min(6, n_dimensions)
+            n_rows = int(np.ceil(n_dimensions / n_cols))
+            
+            fig_w = 4 * n_cols
+            fig_h = 4 * n_rows
+            fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h))
+            
+            # Get best parameters and clustering
+            if method == 'kmeans':
+                best_k = self.results['kmeans']['summary']['best_silhouette']['n_clusters']
+                clusterer = KMeans(n_clusters=best_k, random_state=42, n_init=10)
+                labels = clusterer.fit_predict(self.embeddings)
+                score = self.results['kmeans']['summary']['best_silhouette']['score']
+                title = f'K-means Best Result (k={best_k}) - All Components\\nSilhouette Score: {score:.3f}'
+            elif method == 'spectral':
+                best_k = self.results['spectral']['summary']['best_silhouette']['n_clusters']
+                clusterer = SpectralClustering(n_clusters=best_k, random_state=42, n_init=10)
+                labels = clusterer.fit_predict(self.embeddings)
+                score = self.results['spectral']['summary']['best_silhouette']['score']
+                title = f'Spectral Best Result (k={best_k}) - All Components\\nSilhouette Score: {score:.3f}'
+            else:  # hdbscan
+                best_params = self.results['hdbscan']['summary']['best_silhouette']
+                clusterer = HDBSCAN(
+                    min_cluster_size=best_params['min_cluster_size'],
+                    min_samples=best_params['min_samples'],
+                    cluster_selection_epsilon=0.0
+                )
+                labels = clusterer.fit_predict(self.embeddings)
+                title = f'HDBSCAN Best Result ({best_params["n_clusters"]} clusters) - All Components\\nSilhouette Score: {best_params["score"]:.3f}'
+            
+            fig.suptitle(title, fontsize=16, fontweight='bold')
+            
+            # Handle axis indexing for different grid configurations
+            if n_rows == 1 and n_cols == 1:
+                # Single subplot
+                axes = [axes]
+            elif n_rows == 1:
+                # Single row, multiple columns
+                axes = axes.flatten()
+            elif n_cols == 1:
+                # Single column, multiple rows  
+                axes = axes.flatten()
+            else:
+                # Multiple rows and columns
+                axes = axes.flatten()
+            
+            # Plot each component
+            for k in range(n_dimensions):
+                ax = axes[k]
+                
+                component_values = self.embeddings[:, k]
+                y_jitter = np.random.normal(0, 0.02, len(component_values))
+                
+                # Handle HDBSCAN noise
+                unique_labels = np.unique(labels)
+                if -1 in unique_labels and method == 'hdbscan':
+                    noise_mask = labels == -1
+                    ax.scatter(component_values[noise_mask], y_jitter[noise_mask], 
+                              c='gray', s=1, alpha=0.3, label='Noise' if k == 0 else "")
+                    
+                    cluster_labels = unique_labels[unique_labels != -1]
+                    colors = plt.cm.Set1(np.linspace(0, 1, len(cluster_labels)))
+                    
+                    for i, (label, color) in enumerate(zip(cluster_labels, colors)):
+                        mask = labels == label
+                        ax.scatter(component_values[mask], y_jitter[mask], 
+                                  c=[color], s=1, alpha=0.7, 
+                                  label=f'C{label}' if k == 0 else "")
+                else:
+                    cmap = 'Set1' if method == 'kmeans' else 'Set2'
+                    ax.scatter(component_values, y_jitter, c=labels, cmap=cmap, s=1, alpha=0.7)
+                
+                ax.set_title(f'Component {k+1}')
+                ax.set_xlabel(f'{self.data_type.split()[0]} {k+1}')
+                ax.set_ylabel('Jitter')
+                ax.grid(True, alpha=0.3)
+                
+                # Legend only on first subplot for HDBSCAN
+                if k == 0 and method == 'hdbscan' and -1 in unique_labels:
+                    n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
+                    if n_clusters <= 8:
+                        ax.legend(fontsize=6, markerscale=3)
+            
+            # Hide unused subplots
+            for k in range(n_dimensions, n_rows * n_cols):
+                axes[k].axis('off')
+            
+            plt.tight_layout()
+            plot_path = output_dir / f'best_clustering_results_{method}_multicomponent.png'
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            print(f"✓ Saved {method} multi-component clustering visualization: {plot_path}")
+            plt.close()
     
     def save_results(self, output_dir: Path) -> None:
         """Save detailed results to files."""
