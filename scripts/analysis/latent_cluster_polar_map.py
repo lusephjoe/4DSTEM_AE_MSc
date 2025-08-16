@@ -110,6 +110,12 @@ With custom configuration:
       --scan-shape 256 256 --config config.yaml \
       --device cuda:0 --chunks 2048 --out results
 
+With interactive beam center picking:
+    python scripts/analysis/latent_cluster_polar_map.py \
+      --data patterns.h5 --labels clusters.npy \
+      --scan-shape 128 128 --interactive-center \
+      --out results
+
 Configuration options (config.yaml):
     templates:
       top_percent: 10        # Keep top 10% of template values
@@ -501,6 +507,62 @@ class Preprocessor:
         
         return processed
 
+def interactive_beam_center_picker(sample_pattern: np.ndarray, title: str = "Click to select beam center") -> Tuple[int, int]:
+    """
+    Interactive beam center picking using matplotlib.
+    
+    Opens a window displaying the sample pattern and waits for a single click.
+    The window closes automatically after the center is selected.
+    
+    Parameters:
+    -----------
+    sample_pattern : np.ndarray
+        2D diffraction pattern to display for center picking
+    title : str, optional
+        Window title (default: "Click to select beam center")
+        
+    Returns:
+    --------
+    center : Tuple[int, int]
+        Selected beam center coordinates (cy, cx)
+    """
+    center_coords = [None, None]
+    
+    def on_click(event):
+        if event.inaxes and event.button == 1:  # Left mouse button
+            center_coords[0] = int(round(event.ydata))
+            center_coords[1] = int(round(event.xdata))
+            plt.close()
+    
+    # Create figure and display pattern
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.imshow(sample_pattern, cmap='viridis')
+    ax.set_title(f"{title}\n(Click center, window will close automatically)")
+    ax.set_xlabel("X (pixels)")
+    ax.set_ylabel("Y (pixels)")
+    
+    # Add crosshairs at current center estimate
+    cy_auto, cx_auto = np.unravel_index(np.argmax(ndimage.gaussian_filter(sample_pattern, 3)), sample_pattern.shape)
+    ax.axhline(cy_auto, color='red', linestyle='--', alpha=0.7, label=f'Auto-detected: ({cy_auto}, {cx_auto})')
+    ax.axvline(cx_auto, color='red', linestyle='--', alpha=0.7)
+    ax.legend()
+    
+    # Connect click event
+    fig.canvas.mpl_connect('button_press_event', on_click)
+    
+    print(f"Interactive beam center picker opened. Click on the beam center in the displayed pattern.")
+    print(f"Auto-detected center is shown as red dashed lines at ({cy_auto}, {cx_auto})")
+    
+    plt.show()
+    
+    if center_coords[0] is None:
+        print("No center selected, using auto-detected center")
+        return cy_auto, cx_auto
+    
+    print(f"Selected beam center: ({center_coords[0]}, {center_coords[1]})")
+    return center_coords[0], center_coords[1]
+
+
 class ClusterVirtualDetectors:
     """
     Main class implementing data-driven virtual detectors for 4D-STEM analysis.
@@ -613,24 +675,42 @@ class ClusterVirtualDetectors:
         
         print(f"🔨 Building templates for {len(valid_clusters)} clusters...")
         
-        # Quick pass to detect center if needed
-        center = None
+        # Beam center detection with proper priority: config > interactive > auto-detect
         cal = self.config.get('calibration', {})
         cy, cx = cal.get('center_y'), cal.get('center_x')
-        if cy is None or cx is None:
-            # Load a small sample to detect center
+        interactive_mode = self.config.get('interactive_center', False)
+        
+        # Priority 1: Use config values if both are specified
+        if cy is not None and cx is not None:
+            print(f"🎯 Using beam center from config: ({cy}, {cx})")
+        else:
+            # Load sample data for detection methods
             sample_frames = dataset.load_chunk(0, min(100, dataset.total_frames))
-            sample_mean = np.mean(sample_frames, axis=0).astype(np.float32)  # Convert to float32 for scipy compatibility
-            cy_det, cx_det = np.unravel_index(np.argmax(ndimage.gaussian_filter(sample_mean, 3)), sample_mean.shape)
-            if cy is None:
-                cy = int(cy_det)
+            sample_mean = np.mean(sample_frames, axis=0).astype(np.float32)
+            
+            # Priority 2: Interactive mode if enabled and config incomplete
+            if interactive_mode:
+                print("🖱️  Interactive beam center picking enabled...")
+                cy_picked, cx_picked = interactive_beam_center_picker(sample_mean)
+                cy, cx = cy_picked, cx_picked
                 self.config.setdefault('calibration', {})['center_y'] = cy
-            if cx is None:
-                cx = int(cx_det)
                 self.config.setdefault('calibration', {})['center_x'] = cx
-            print(f"🎯 Auto-detected beam center: ({cy}, {cx})")
+                print(f"🎯 Interactively selected beam center: ({cy}, {cx})")
+            else:
+                # Priority 3: Auto-detect missing coordinates
+                cy_det, cx_det = np.unravel_index(np.argmax(ndimage.gaussian_filter(sample_mean, 3)), sample_mean.shape)
+                if cy is None:
+                    cy = int(cy_det)
+                    self.config.setdefault('calibration', {})['center_y'] = cy
+                if cx is None:
+                    cx = int(cx_det)
+                    self.config.setdefault('calibration', {})['center_x'] = cx
+                print(f"🎯 Auto-detected beam center: ({cy}, {cx})")
         
         center = (cy, cx) if cy is not None and cx is not None else None
+        
+        # Print final center coordinates being used for all calculations
+        print(f"🎯 FINAL BEAM CENTER: ({cy}, {cx}) - This will be used for all calculations")
         
         # Initialize preprocessor with detected center
         prep = Preprocessor(self.config.get('preprocess', {}), (dataset.Ky, dataset.Kx), center)
@@ -1536,6 +1616,11 @@ Examples:
         --data patterns.h5 --labels clustering_data.npz \\
         --scan-shape 128 128 --config config.yaml \\
         --chunks 1024 --out polarization_analysis
+
+    python scripts/analysis/latent_cluster_polar_map.py \\
+        --data patterns.h5 --labels clusters.npy \\
+        --scan-shape 128 128 --interactive-center \\
+        --out results
         """
     )
     
@@ -1558,6 +1643,8 @@ Examples:
                        help='Compute device (cpu, cuda:0, etc.)')
     parser.add_argument('--chunks', type=int, default=1024,
                        help='Chunk size for processing (default: 1024)')
+    parser.add_argument('--interactive-center', action='store_true',
+                       help='Enable interactive beam center picking (opens GUI window)')
     
     args = parser.parse_args()
     
@@ -1580,6 +1667,7 @@ Examples:
     # Load configuration
     config = load_config(args.config)
     config['device'] = args.device  # Override device from CLI
+    config['interactive_center'] = args.interactive_center  # Override interactive mode from CLI
     
     # Initialize timing
     total_timer = Timer("Complete analysis", verbose=False)
