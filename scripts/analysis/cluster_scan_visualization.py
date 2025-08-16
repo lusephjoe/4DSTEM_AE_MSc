@@ -2,17 +2,31 @@
 """
 Cluster Scan Visualization for 4D-STEM Analysis
 
-Overlays UMAP clustering results on STEM images to visualize domains and topologies.
-Takes the output from umap_latent_visualization.py and shows clusters as colored overlays
-on STEM virtual detector images.
+Overlays clustering results on STEM images to visualize domains and topologies.
+Takes clustering outputs (from UMAP, K-means, spectral clustering, etc.) and shows 
+clusters as colored overlays on STEM virtual detector images.
+
+Supported Input Formats:
+    - .npz files with 'cluster_labels' key (and optional 'spatial_coordinates')
+    - .npy files containing cluster labels directly  
+    - .json files with cluster_labels and spatial_coordinates
 
 Usage:
+    # With .npz clustering results
     python scripts/analysis/cluster_scan_visualization.py \
-        --umap_results umap_analysis/umap_data.npz \
+        --clustered_data clustering_results/kmeans_k8_labels.npz \
         --raw_data data/patterns.h5 \
         --output_dir cluster_visualization \
         --scan_shape 64 64 \
         --virtual bf
+
+    # With .npy cluster labels only
+    python scripts/analysis/cluster_scan_visualization.py \
+        --clustered_data clustering_results/cluster_labels.npy \
+        --raw_data data/patterns.h5 \
+        --output_dir cluster_visualization \
+        --scan_shape 128 128 \
+        --virtual df
 """
 
 import argparse
@@ -33,9 +47,9 @@ from stem_visualization import STEMVisualizer
 class ClusterScanVisualizer:
     """Simple cluster visualization on STEM images."""
     
-    def __init__(self, umap_results_path: Path, raw_data_path: Path):
-        """Initialize with paths to UMAP results and raw data."""
-        self.umap_results_path = umap_results_path
+    def __init__(self, clustered_results_path: Path, raw_data_path: Path):
+        """Initialize with paths to clustering results and raw data."""
+        self.clustered_results_path = clustered_results_path
         self.raw_data_path = raw_data_path
         self.cluster_labels = None
         self.spatial_coords = None
@@ -87,27 +101,33 @@ class ClusterScanVisualizer:
         else:
             raise ValueError(f"Unknown file type {path.suffix}")
     
-    def load_umap_results(self):
-        """Load UMAP clustering results."""
-        print(f"Loading UMAP results from: {self.umap_results_path}")
+    def load_clustered_results(self):
+        """Load clustering results from various formats."""
+        print(f"Loading clustering results from: {self.clustered_results_path}")
         
-        if self.umap_results_path.suffix == '.npz':
-            data = np.load(self.umap_results_path, allow_pickle=True)
+        if self.clustered_results_path.suffix == '.npz':
+            data = np.load(self.clustered_results_path, allow_pickle=True)
             self.cluster_labels = data['cluster_labels']
             self.spatial_coords = data.get('spatial_coordinates', None)
             
-        elif self.umap_results_path.suffix == '.json':
-            with open(self.umap_results_path, 'r') as f:
+        elif self.clustered_results_path.suffix == '.npy':
+            # Direct cluster labels from .npy file
+            self.cluster_labels = np.load(self.clustered_results_path)
+            self.spatial_coords = None
+            print("✓ Loaded cluster labels from .npy file (no spatial coordinates)")
+            
+        elif self.clustered_results_path.suffix == '.json':
+            with open(self.clustered_results_path, 'r') as f:
                 data = json.load(f)
             self.cluster_labels = np.array(data['cluster_labels'])
             self.spatial_coords = np.array(data['spatial_coordinates']) if data['spatial_coordinates'] else None
             self.metadata = data.get('metadata', {})
         
         else:
-            raise ValueError(f"Unsupported UMAP results format: {self.umap_results_path.suffix}")
+            raise ValueError(f"Unsupported clustering results format: {self.clustered_results_path.suffix}")
         
         if self.cluster_labels is None:
-            raise ValueError("No cluster labels found in UMAP results")
+            raise ValueError("No cluster labels found in clustering results")
         
         # Get cluster statistics
         unique_labels = np.unique(self.cluster_labels)
@@ -461,8 +481,8 @@ def main():
     parser = argparse.ArgumentParser(description="Cluster Scan Visualization for 4D-STEM Analysis")
     
     # Required arguments
-    parser.add_argument("--umap_results", type=Path, required=True,
-                       help="Path to UMAP results (.npz or .json)")
+    parser.add_argument("--clustered_data", type=Path, required=True,
+                       help="Path to clustering results (.npz, .npy, or .json)")
     parser.add_argument("--raw_data", type=Path, required=True,
                        help="Path to raw 4D-STEM data (.h5, .pt, .npz)")
     parser.add_argument("--output_dir", type=Path, default="cluster_visualization",
@@ -482,15 +502,15 @@ def main():
     args = parser.parse_args()
     
     # Validate inputs
-    if not args.umap_results.exists():
-        raise FileNotFoundError(f"UMAP results not found: {args.umap_results}")
+    if not args.clustered_data.exists():
+        raise FileNotFoundError(f"Clustering results not found: {args.clustered_data}")
     if not args.raw_data.exists():
         raise FileNotFoundError(f"Raw data not found: {args.raw_data}")
     
     print("="*80)
     print("CLUSTER SCAN VISUALIZATION")
     print("="*80)
-    print(f"UMAP results: {args.umap_results}")
+    print(f"Clustering results: {args.clustered_data}")
     print(f"Raw data: {args.raw_data}")
     print(f"Output: {args.output_dir}")
     print(f"Virtual detector: {args.virtual}")
@@ -498,10 +518,10 @@ def main():
     print("="*80)
     
     # Initialize visualizer
-    visualizer = ClusterScanVisualizer(args.umap_results, args.raw_data)
+    visualizer = ClusterScanVisualizer(args.clustered_data, args.raw_data)
     
     # Load data
-    cluster_labels, spatial_coords = visualizer.load_umap_results()
+    cluster_labels, spatial_coords = visualizer.load_clustered_results()
     raw_data = visualizer.load_raw_data()
     
     # Setup coordinates with manual scan shape

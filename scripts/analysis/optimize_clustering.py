@@ -608,9 +608,8 @@ class ClusteringOptimizer:
         elif n_dimensions == 2:
             self._create_2d_clustering_plot(labels, result_dir, method, param_identifier, metrics)
         else:
-            # For >2D data, create both a PCA overview and multi-component view
+            # For >2D data, create PCA overview
             self._create_2d_clustering_plot(labels, result_dir, method, param_identifier, metrics, use_pca=True)
-            self._create_multicomponent_clustering_plot(labels, result_dir, method, param_identifier, metrics)
     
     def _create_1d_clustering_plot(self, labels: np.ndarray, result_dir: Path, 
                                   method: str, param_identifier: str, metrics: Dict) -> None:
@@ -725,82 +724,6 @@ Davies-Bouldin: {metrics["davies_bouldin_score"]:.3f}
         plt.savefig(plot_path, dpi=150, bbox_inches='tight')
         plt.close()
     
-    def _create_multicomponent_clustering_plot(self, labels: np.ndarray, result_dir: Path, 
-                                              method: str, param_identifier: str, metrics: Dict) -> None:
-        """Create multi-component clustering visualization showing all dimensions."""
-        n_dimensions = self.embeddings.shape[1]
-        n_cols = min(6, n_dimensions)  # Max 6 columns for readability
-        n_rows = int(np.ceil(n_dimensions / n_cols))
-        
-        # Create figure with appropriate size
-        fig_w = 4 * n_cols
-        fig_h = 4 * n_rows
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h))
-        fig.suptitle(f'{method.title()} Clustering: {param_identifier} - All Components', 
-                    fontsize=16, fontweight='bold')
-        
-        # Handle axis indexing for different grid configurations
-        if n_rows == 1 and n_cols == 1:
-            # Single subplot
-            axes = [axes]
-        elif n_rows == 1:
-            # Single row, multiple columns
-            axes = axes.flatten()
-        elif n_cols == 1:
-            # Single column, multiple rows  
-            axes = axes.flatten()
-        else:
-            # Multiple rows and columns
-            axes = axes.flatten()
-        
-        # Plot each component
-        for k in range(n_dimensions):
-            ax = axes[k]
-            
-            # Create 1D plot for each component
-            component_values = self.embeddings[:, k]
-            y_jitter = np.random.normal(0, 0.02, len(component_values))
-            
-            # Handle noise points for HDBSCAN
-            unique_labels = np.unique(labels)
-            if -1 in unique_labels:
-                # Plot noise points first
-                noise_mask = labels == -1
-                ax.scatter(component_values[noise_mask], y_jitter[noise_mask], 
-                          c='gray', s=1, alpha=0.3, label='Noise' if k == 0 else "")
-                
-                # Plot clusters
-                cluster_labels = unique_labels[unique_labels != -1]
-                colors = plt.cm.Set1(np.linspace(0, 1, len(cluster_labels)))
-                
-                for i, (label, color) in enumerate(zip(cluster_labels, colors)):
-                    mask = labels == label
-                    ax.scatter(component_values[mask], y_jitter[mask], 
-                              c=[color], s=1, alpha=0.7, 
-                              label=f'C{label}' if k == 0 else "")
-            else:
-                ax.scatter(component_values, y_jitter, c=labels, cmap='Set1', s=1, alpha=0.7)
-            
-            ax.set_title(f'Component {k+1}')
-            ax.set_xlabel(f'{self.data_type.split()[0]} {k+1}')
-            ax.set_ylabel('Jitter')
-            ax.grid(True, alpha=0.3)
-            
-            # Only show legend on first subplot
-            if k == 0 and -1 in unique_labels:
-                n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
-                if n_clusters <= 8:
-                    ax.legend(fontsize=6, markerscale=3)
-        
-        # Hide unused subplots
-        for k in range(n_dimensions, n_rows * n_cols):
-            axes[k].axis('off')
-        
-        plt.tight_layout()
-        plot_path = result_dir / f'{method}_{param_identifier}_clustering_multicomponent.png'
-        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-        plt.close()
-    
     def create_visualization(self, output_dir: Path) -> None:
         """Create comprehensive visualization of clustering optimization results."""
         output_dir = Path(output_dir)
@@ -819,10 +742,9 @@ Davies-Bouldin: {metrics["davies_bouldin_score"]:.3f}
             print("Creating 2D clustering visualizations...")
             self._create_best_clustering_2d(output_dir)
         else:
-            print(f"Creating multi-dimensional clustering visualizations for {n_dimensions}D data...")
-            # For >2D data, create both PCA overview and multi-component views
+            print(f"Creating PCA visualization for {n_dimensions}D data...")
+            # For >2D data, create PCA overview
             self._create_best_clustering_2d(output_dir, use_pca=True)
-            self._create_best_clustering_multicomponent(output_dir)
     
     def _create_optimization_plots(self, output_dir: Path) -> None:
         """Create the main optimization plots (metric curves, heatmaps, etc.)."""
@@ -1206,120 +1128,6 @@ Davies-Bouldin: {metrics["davies_bouldin_score"]:.3f}
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         print(f"✓ Saved 2D clustering visualization: {plot_path}")
         plt.close()
-    
-    def _create_best_clustering_multicomponent(self, output_dir: Path) -> None:
-        """Create multi-component clustering visualizations for best results."""
-        if not self.results:
-            return
-        
-        n_dimensions = self.embeddings.shape[1]
-        
-        # Count available methods
-        methods_available = []
-        if 'kmeans' in self.results and 'error' not in self.results['kmeans']:
-            methods_available.append('kmeans')
-        if 'spectral' in self.results and 'error' not in self.results['spectral']:
-            methods_available.append('spectral')
-        if 'hdbscan' in self.results and 'error' not in self.results['hdbscan']:
-            methods_available.append('hdbscan')
-        
-        if not methods_available:
-            return
-        
-        # Create separate plots for each method
-        for method in methods_available:
-            n_cols = min(6, n_dimensions)
-            n_rows = int(np.ceil(n_dimensions / n_cols))
-            
-            fig_w = 4 * n_cols
-            fig_h = 4 * n_rows
-            fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h))
-            
-            # Get best parameters and clustering
-            if method == 'kmeans':
-                best_k = self.results['kmeans']['summary']['best_silhouette']['n_clusters']
-                clusterer = KMeans(n_clusters=best_k, random_state=42, n_init=10)
-                labels = clusterer.fit_predict(self.embeddings)
-                score = self.results['kmeans']['summary']['best_silhouette']['score']
-                title = f'K-means Best Result (k={best_k}) - All Components\\nSilhouette Score: {score:.3f}'
-            elif method == 'spectral':
-                best_k = self.results['spectral']['summary']['best_silhouette']['n_clusters']
-                clusterer = SpectralClustering(n_clusters=best_k, random_state=42, n_init=10)
-                labels = clusterer.fit_predict(self.embeddings)
-                score = self.results['spectral']['summary']['best_silhouette']['score']
-                title = f'Spectral Best Result (k={best_k}) - All Components\\nSilhouette Score: {score:.3f}'
-            else:  # hdbscan
-                best_params = self.results['hdbscan']['summary']['best_silhouette']
-                clusterer = HDBSCAN(
-                    min_cluster_size=best_params['min_cluster_size'],
-                    min_samples=best_params['min_samples'],
-                    cluster_selection_epsilon=0.0
-                )
-                labels = clusterer.fit_predict(self.embeddings)
-                title = f'HDBSCAN Best Result ({best_params["n_clusters"]} clusters) - All Components\\nSilhouette Score: {best_params["score"]:.3f}'
-            
-            fig.suptitle(title, fontsize=16, fontweight='bold')
-            
-            # Handle axis indexing for different grid configurations
-            if n_rows == 1 and n_cols == 1:
-                # Single subplot
-                axes = [axes]
-            elif n_rows == 1:
-                # Single row, multiple columns
-                axes = axes.flatten()
-            elif n_cols == 1:
-                # Single column, multiple rows  
-                axes = axes.flatten()
-            else:
-                # Multiple rows and columns
-                axes = axes.flatten()
-            
-            # Plot each component
-            for k in range(n_dimensions):
-                ax = axes[k]
-                
-                component_values = self.embeddings[:, k]
-                y_jitter = np.random.normal(0, 0.02, len(component_values))
-                
-                # Handle HDBSCAN noise
-                unique_labels = np.unique(labels)
-                if -1 in unique_labels and method == 'hdbscan':
-                    noise_mask = labels == -1
-                    ax.scatter(component_values[noise_mask], y_jitter[noise_mask], 
-                              c='gray', s=1, alpha=0.3, label='Noise' if k == 0 else "")
-                    
-                    cluster_labels = unique_labels[unique_labels != -1]
-                    colors = plt.cm.Set1(np.linspace(0, 1, len(cluster_labels)))
-                    
-                    for i, (label, color) in enumerate(zip(cluster_labels, colors)):
-                        mask = labels == label
-                        ax.scatter(component_values[mask], y_jitter[mask], 
-                                  c=[color], s=1, alpha=0.7, 
-                                  label=f'C{label}' if k == 0 else "")
-                else:
-                    cmap = 'Set1' if method == 'kmeans' else 'Set2'
-                    ax.scatter(component_values, y_jitter, c=labels, cmap=cmap, s=1, alpha=0.7)
-                
-                ax.set_title(f'Component {k+1}')
-                ax.set_xlabel(f'{self.data_type.split()[0]} {k+1}')
-                ax.set_ylabel('Jitter')
-                ax.grid(True, alpha=0.3)
-                
-                # Legend only on first subplot for HDBSCAN
-                if k == 0 and method == 'hdbscan' and -1 in unique_labels:
-                    n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
-                    if n_clusters <= 8:
-                        ax.legend(fontsize=6, markerscale=3)
-            
-            # Hide unused subplots
-            for k in range(n_dimensions, n_rows * n_cols):
-                axes[k].axis('off')
-            
-            plt.tight_layout()
-            plot_path = output_dir / f'best_clustering_results_{method}_multicomponent.png'
-            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-            print(f"✓ Saved {method} multi-component clustering visualization: {plot_path}")
-            plt.close()
     
     def save_results(self, output_dir: Path) -> None:
         """Save detailed results to files."""

@@ -620,7 +620,7 @@ class ClusterVirtualDetectors:
         if cy is None or cx is None:
             # Load a small sample to detect center
             sample_frames = dataset.load_chunk(0, min(100, dataset.total_frames))
-            sample_mean = np.mean(sample_frames, axis=0)
+            sample_mean = np.mean(sample_frames, axis=0).astype(np.float32)  # Convert to float32 for scipy compatibility
             cy_det, cx_det = np.unravel_index(np.argmax(ndimage.gaussian_filter(sample_mean, 3)), sample_mean.shape)
             if cy is None:
                 cy = int(cy_det)
@@ -1301,13 +1301,25 @@ def create_visualizations(output_dir: Path, contrast_maps: Dict, argmax_map: np.
     rows = (n_clusters + cols - 1) // cols
     
     fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 4*rows))
-    if rows == 1:
-        axes = axes.reshape(1, -1)
+    
+    # Handle axis indexing for different grid configurations
+    if rows == 1 and cols == 1:
+        # Single subplot
+        axes = [axes]
+    elif rows == 1:
+        # Single row, multiple columns
+        axes = axes.flatten()
+    elif cols == 1:
+        # Single column, multiple rows  
+        axes = axes.flatten()
+    else:
+        # Multiple rows and columns
+        axes = axes.flatten()
+    
     fig.suptitle('Cluster Templates and Gates', fontsize=16)
     
     for i, cluster_id in enumerate(clusters):
-        row, col = i // cols, i % cols
-        ax = axes[row, col] if rows > 1 else axes[col]
+        ax = axes[i]
         
         # Show template with gate overlay
         template = templates[cluster_id]
@@ -1321,8 +1333,7 @@ def create_visualizations(output_dir: Path, contrast_maps: Dict, argmax_map: np.
     
     # Hide unused subplots
     for i in range(n_clusters, rows * cols):
-        row, col = i // cols, i % cols
-        axes[row, col].set_visible(False)
+        axes[i].set_visible(False)
     
     plt.tight_layout()
     plt.savefig(figures_dir / 'montage_templates.png', dpi=300, bbox_inches='tight')
