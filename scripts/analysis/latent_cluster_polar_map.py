@@ -152,9 +152,12 @@ Configuration options (config.yaml):
     calibration:
       center_y: null         # Auto-detect beam center if null
       center_x: null
+      pixel_size: null       # Direct pixel size in nm/pixel (takes precedence)
+      pixel_size_units: "nm" # Units for pixel_size: "nm" or "angstrom" 
       pixel_size_k: 1.0      # k-space pixel size (1/Å or relative units)
-      pixel_size_ky: null    # Anisotropic k-space calibration (y-axis)
-      pixel_size_kx: null    # Anisotropic k-space calibration (x-axis)
+      pixel_size_ky: null    # Anisotropic k-space calibration (y-axis, same units as pixel_size_k)
+      pixel_size_kx: null    # Anisotropic k-space calibration (x-axis, same units as pixel_size_k)
+      convergence_angle: null # Convergence angle in mrad (for advanced calculations)
     
     validation:
       enable_split_half: false  # Enable template stability validation
@@ -209,6 +212,7 @@ The script provides advanced interactive calibration capabilities:
    - Shows guiding circles and beam center marker
    - Click two opposite Bragg peaks (180° apart) or ring boundaries
    - Automatically calculates pixel_size_ky and pixel_size_kx
+   - If pixel_size is specified in config, it takes precedence over calculations
    - Supports both absolute calibration (with --known-spacing) and relative
    - Updates config without reloading data for efficient workflow
 
@@ -228,6 +232,12 @@ Example with known silicon (220) reflection (d = 1.92 Å):
     python script.py --data si.h5 --labels clusters.npy \\
                      --interactive-kspace --known-spacing 1.92 \\
                      --scan-shape 256 256 --out results
+
+Example polar_config.yaml with direct pixel size specification:
+    calibration:
+      pixel_size: 0.1         # Direct specification takes precedence
+      pixel_size_units: "nm"  # Units: "nm" or "angstrom"
+      convergence_angle: 20.0 # mrad (logged for calculations)
 
 PERFORMANCE AND OPTIMIZATION
 =============================
@@ -813,6 +823,7 @@ class ClusterVirtualDetectors:
     
     def __init__(self, config: Dict):
         self.config = config
+        self._validate_calibration_config()
         self.device = config.get('device', 'cpu')
         self.use_gpu = self.device.startswith('cuda') and CUPY_AVAILABLE
         
@@ -828,6 +839,60 @@ class ClusterVirtualDetectors:
         self.mu_clusters = {}
         self.mu_global = None
         self.sigma_global = None
+        
+    def _validate_calibration_config(self):
+        """Validate calibration parameters and log usage information."""
+        cal = self.config.get('calibration', {})
+        
+        pixel_size = cal.get('pixel_size')
+        pixel_size_units = cal.get('pixel_size_units', 'nm')
+        pixel_size_ky = cal.get('pixel_size_ky')
+        pixel_size_kx = cal.get('pixel_size_kx')
+        convergence_angle = cal.get('convergence_angle')
+        
+        if pixel_size is not None:
+            print(f"Config validation: pixel_size={pixel_size} {pixel_size_units}/pixel will take precedence over calculated values")
+            
+        if convergence_angle is not None:
+            print(f"Config validation: convergence_angle={convergence_angle} mrad is available for calculations")
+            
+        # Check for potential conflicts (warn but don't fail)
+        if pixel_size is not None and pixel_size_ky is not None:
+            if abs(pixel_size - pixel_size_ky) > 1e-6:
+                print(f"Warning: pixel_size ({pixel_size}) differs from pixel_size_ky ({pixel_size_ky})")
+                print("  -> pixel_size will take precedence")
+                
+        if pixel_size is not None and pixel_size_kx is not None:
+            if abs(pixel_size - pixel_size_kx) > 1e-6:
+                print(f"Warning: pixel_size ({pixel_size}) differs from pixel_size_kx ({pixel_size_kx})")
+                print("  -> pixel_size will take precedence")
+    
+    def _convert_pixel_size_to_k_space(self, pixel_size: float, units: str) -> float:
+        """
+        Convert real-space pixel size to k-space pixel size.
+        
+        Parameters:
+        - pixel_size: Real-space pixel size value
+        - units: "nm" or "angstrom"
+        
+        Returns:
+        - k-space pixel size in (1/Å)/pixel
+        
+        Note: This assumes the pixel_size represents the sampling in diffraction space,
+        not real space. For 4D-STEM, this is typically the angular sampling converted
+        to reciprocal space units.
+        """
+        if units.lower() in ['nm', 'nanometer', 'nanometers']:
+            # Convert nm to Angstrom, then take reciprocal
+            pixel_size_angstrom = pixel_size * 10.0  # nm to Angstrom
+            return 1.0 / pixel_size_angstrom  # (1/Å)/pixel
+        elif units.lower() in ['angstrom', 'ang', 'å', 'a']:
+            # Direct reciprocal
+            return 1.0 / pixel_size  # (1/Å)/pixel
+        else:
+            print(f"Warning: Unknown pixel_size_units '{units}', assuming nm")
+            pixel_size_angstrom = pixel_size * 10.0
+            return 1.0 / pixel_size_angstrom
         
     def load_data(self, data_path: Path, dataset_name: str, scan_shape: Tuple[int, int]) -> H5Dataset:
         """Load 4D-STEM data."""
@@ -947,9 +1012,16 @@ class ClusterVirtualDetectors:
                 sample_mean, (cy, cx), known_spacing
             )
             # Update config with new calibration
+            # Update both anisotropic and direct pixel size fields
             self.config.setdefault('calibration', {})['pixel_size_ky'] = pixel_size_ky
             self.config.setdefault('calibration', {})['pixel_size_kx'] = pixel_size_kx
-            print(f"K-space calibration updated: ky={pixel_size_ky:.6f}, kx={pixel_size_kx:.6f}")
+            
+            # If isotropic (ky == kx), also set the direct pixel_size for future precedence
+            if abs(pixel_size_ky - pixel_size_kx) < 1e-10:
+                self.config.setdefault('calibration', {})['pixel_size'] = pixel_size_ky
+                print(f"K-space calibration updated: isotropic pixel_size={pixel_size_ky:.6f}")
+            else:
+                print(f"K-space calibration updated: anisotropic ky={pixel_size_ky:.6f}, kx={pixel_size_kx:.6f}")
         
         # Initialize preprocessor with detected center
         prep = Preprocessor(self.config.get('preprocess', {}), (dataset.Ky, dataset.Kx), center)
@@ -1378,9 +1450,27 @@ class ClusterVirtualDetectors:
             self.config.setdefault('calibration', {})['center_x'] = int(cx)
             print(f"Auto-detected beam center: ({cy}, {cx})")
 
-        # Support anisotropic pixel sizes and sign conventions
-        dky = cal.get('pixel_size_ky', cal.get('pixel_size_k', 1.0))
-        dkx = cal.get('pixel_size_kx', cal.get('pixel_size_k', 1.0))
+        # Support anisotropic pixel sizes with precedence hierarchy:
+        # 1. Direct pixel_size (if specified, takes precedence)
+        # 2. Anisotropic pixel_size_ky/pixel_size_kx 
+        # 3. Fallback to pixel_size_k
+        
+        pixel_size_direct = cal.get('pixel_size')
+        if pixel_size_direct is not None:
+            # Convert pixel_size to k-space units (1/Å per pixel)
+            pixel_size_units = cal.get('pixel_size_units', 'nm')
+            pixel_size_k_converted = self._convert_pixel_size_to_k_space(pixel_size_direct, pixel_size_units)
+            print(f"Using direct pixel_size from config: {pixel_size_direct} {pixel_size_units}/pixel")
+            print(f"Converted to k-space: {pixel_size_k_converted:.6f} (1/Å)/pixel")
+            dky = dkx = pixel_size_k_converted
+        else:
+            dky = cal.get('pixel_size_ky', cal.get('pixel_size_k', 1.0))
+            dkx = cal.get('pixel_size_kx', cal.get('pixel_size_k', 1.0))
+            
+        # Log convergence angle if provided
+        convergence_angle = cal.get('convergence_angle')
+        if convergence_angle is not None:
+            print(f"Convergence angle: {convergence_angle} mrad")
         
         y = (np.arange(Ky) - cy) * dky
         x = (np.arange(Kx) - cx) * dkx
@@ -1870,9 +1960,12 @@ def load_config(config_path: Optional[Path]) -> Dict:
         'calibration': {
             'center_y': None,
             'center_x': None,
+            'pixel_size': None,     # Direct pixel size (takes precedence)
+            'pixel_size_units': 'nm',  # Units for pixel_size: "nm" or "angstrom"
             'pixel_size_k': 1.0,
-            'pixel_size_ky': None,  # If None, falls back to pixel_size_k
-            'pixel_size_kx': None   # If None, falls back to pixel_size_k
+            'pixel_size_ky': None,  # If None, falls back to pixel_size_k or converted pixel_size
+            'pixel_size_kx': None,  # If None, falls back to pixel_size_k or converted pixel_size
+            'convergence_angle': None  # Convergence angle in mrad
         },
         'validation': {
             'enable_split_half': False
