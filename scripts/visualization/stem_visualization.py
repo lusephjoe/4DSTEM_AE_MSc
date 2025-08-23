@@ -1653,7 +1653,8 @@ Center: {detector_params['beam_center']}"""
             df_image = self.create_dark_field_image(inner_radius, outer_radius)
         else:
             # Old rectangular format for backward compatibility
-            df_image = self.create_virtual_field_image(self.dark_field_region)
+            center_y, center_x, inner_radius, outer_radius = self.dark_field_region
+            df_image = self.create_dark_field_image(inner_radius, outer_radius)
             
         im2 = axes[2].imshow(df_image, cmap='hot')
         axes[2].set_title('Virtual Dark Field (Annular)')
@@ -1735,7 +1736,8 @@ Center: {detector_params['beam_center']}"""
         ax_idx += 1
         
         # Dark field
-        df_image = self.create_virtual_field_image(self.dark_field_region)
+        center_y, center_x, inner_radius, outer_radius = self.dark_field_region
+        df_image = self.create_dark_field_image(inner_radius, outer_radius)
         im = axes[ax_idx // cols, ax_idx % cols].imshow(df_image, cmap='hot')
         axes[ax_idx // cols, ax_idx % cols].set_title('Virtual Dark Field')
         axes[ax_idx // cols, ax_idx % cols].axis('off')
@@ -1763,7 +1765,8 @@ Center: {detector_params['beam_center']}"""
             ax_idx += 1
             
             # Reconstructed dark field
-            comp_df = comp_viz.create_virtual_field_image(self.dark_field_region)
+            center_y, center_x, inner_radius, outer_radius = self.dark_field_region
+            comp_df = comp_viz.create_dark_field_image(inner_radius, outer_radius)
             axes[ax_idx // cols, ax_idx % cols].imshow(comp_df, cmap='hot')
             axes[ax_idx // cols, ax_idx % cols].set_title('Reconstructed Dark Field')
             axes[ax_idx // cols, ax_idx % cols].axis('off')
@@ -1898,7 +1901,8 @@ def main():
         df_image = visualizer.create_dark_field_image(inner_radius, outer_radius)
     else:
         # Old rectangular format for backward compatibility
-        df_image = visualizer.create_virtual_field_image(visualizer.dark_field_region)
+        center_y, center_x, inner_radius, outer_radius = visualizer.dark_field_region
+        df_image = visualizer.create_dark_field_image(inner_radius, outer_radius)
         
     axes[2].imshow(df_image, cmap='hot')
     axes[2].set_title('Virtual Dark Field (Annular)')

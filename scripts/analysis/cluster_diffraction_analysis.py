@@ -101,6 +101,125 @@ class ClusterDiffractionAnalyzer:
         # Find reference beam center
         self.reference_center = self._find_beam_center(self.reference_pattern)
         print(f"Reference beam center: {self.reference_center}")
+    
+    def interactive_beam_center_selection(self):
+        """
+        Interactive beam center selection by clicking on the diffraction pattern.
+        
+        Returns:
+            Tuple of (center_y, center_x) coordinates
+        """
+        import matplotlib.pyplot as plt
+        from matplotlib.widgets import Button
+        
+        print("Interactive beam center selection:")
+        print("1. A window will show the reference diffraction pattern")
+        print("2. Click on the center of the direct beam")
+        print("3. Click 'Done' to confirm or 'Auto' to use automatic detection")
+        print("4. Close the window when finished")
+        
+        fig, ax = plt.subplots(figsize=(10, 10))
+        
+        # Display reference pattern
+        pattern_display = np.log(self.reference_pattern + 1e-6)
+        im = ax.imshow(pattern_display, cmap='viridis')
+        ax.set_title('Click on Direct Beam Center\n(Reference Pattern - Log Scale)', 
+                    fontsize=14, fontweight='bold')
+        plt.colorbar(im, ax=ax, shrink=0.8)
+        
+        # Show current automatic center
+        auto_y, auto_x = self.reference_center
+        current_marker = ax.plot(auto_x, auto_y, 'r+', markersize=15, markeredgewidth=3, 
+                               label='Current Center')[0]
+        ax.legend()
+        
+        # State variables
+        selected_center = self.reference_center
+        click_marker = None
+        
+        def onclick(event):
+            nonlocal selected_center, click_marker
+            
+            if event.inaxes != ax or event.button != 1:
+                return
+            
+            # Get click coordinates
+            x, y = int(round(event.xdata)), int(round(event.ydata))
+            selected_center = (y, x)
+            
+            # Update marker
+            if click_marker is not None:
+                click_marker.remove()
+            
+            click_marker = ax.plot(x, y, 'go', markersize=12, markeredgewidth=2, 
+                                 label='Selected Center')[0]
+            ax.legend()
+            ax.set_title(f'Selected Center: ({y}, {x})\nClick Done to confirm', 
+                        fontsize=14, fontweight='bold')
+            fig.canvas.draw()
+        
+        # Connect click event
+        fig.canvas.mpl_connect('button_press_event', onclick)
+        
+        # Add control buttons
+        button_height = 0.04
+        button_width = 0.1
+        
+        # Done button
+        ax_done = plt.axes([0.7, 0.02, button_width, button_height])
+        done_button = Button(ax_done, 'Done')
+        
+        # Auto button  
+        ax_auto = plt.axes([0.82, 0.02, button_width, button_height])
+        auto_button = Button(ax_auto, 'Auto')
+        
+        # Reset button
+        ax_reset = plt.axes([0.58, 0.02, button_width, button_height])
+        reset_button = Button(ax_reset, 'Reset')
+        
+        def on_done(event):
+            plt.close(fig)
+        
+        def on_auto(event):
+            nonlocal selected_center, click_marker
+            selected_center = self._find_beam_center(self.reference_pattern)
+            
+            # Update display
+            if click_marker is not None:
+                click_marker.remove()
+            
+            y, x = selected_center
+            click_marker = ax.plot(x, y, 'go', markersize=12, markeredgewidth=2,
+                                 label='Auto Center')[0]
+            ax.legend()
+            ax.set_title(f'Auto Center: ({y}, {x})\nClick Done to confirm',
+                        fontsize=14, fontweight='bold')
+            fig.canvas.draw()
+        
+        def on_reset(event):
+            nonlocal selected_center, click_marker
+            selected_center = self.reference_center
+            
+            if click_marker is not None:
+                click_marker.remove()
+                click_marker = None
+            
+            ax.legend()
+            ax.set_title('Click on Direct Beam Center\n(Reference Pattern - Log Scale)',
+                        fontsize=14, fontweight='bold')
+            fig.canvas.draw()
+        
+        done_button.on_clicked(on_done)
+        auto_button.on_clicked(on_auto)
+        reset_button.on_clicked(on_reset)
+        
+        plt.show()
+        
+        # Update the reference center
+        self.reference_center = selected_center
+        print(f"Updated beam center: {self.reference_center}")
+        
+        return selected_center
         
     def _find_beam_center(self, pattern: np.ndarray) -> Tuple[int, int]:
         """
@@ -113,18 +232,24 @@ class ClusterDiffractionAnalyzer:
             (center_y, center_x) coordinates
         """
         # Use center of mass approach for robustness
+        # Convert to float32 if needed (scipy doesn't support float16)
+        if pattern.dtype == np.float16:
+            pattern_work = pattern.astype(np.float32)
+        else:
+            pattern_work = pattern
+        
         # Apply Gaussian smoothing to reduce noise
-        smooth_pattern = ndimage.gaussian_filter(pattern, sigma=2.0)
+        smooth_pattern = ndimage.gaussian_filter(pattern_work, sigma=2.0)
         
         # Find the maximum intensity region
         max_pos = np.unravel_index(np.argmax(smooth_pattern), smooth_pattern.shape)
         
         # Refine using center of mass in a local region
-        region_size = min(pattern.shape) // 10
+        region_size = min(pattern_work.shape) // 10
         y_min = max(0, max_pos[0] - region_size)
-        y_max = min(pattern.shape[0], max_pos[0] + region_size)
+        y_max = min(pattern_work.shape[0], max_pos[0] + region_size)
         x_min = max(0, max_pos[1] - region_size)
-        x_max = min(pattern.shape[1], max_pos[1] + region_size)
+        x_max = min(pattern_work.shape[1], max_pos[1] + region_size)
         
         # Create coordinate grids
         y_coords, x_coords = np.mgrid[y_min:y_max, x_min:x_max]
@@ -141,7 +266,7 @@ class ClusterDiffractionAnalyzer:
         return int(round(center_y)), int(round(center_x))
     
     def compute_cluster_patterns(self, normalize=True, subtract_background=True, 
-                                recenter=True, method='mean'):
+                                recenter=True, method='mean', recenter_each=False):
         """
         Compute cluster-averaged diffraction patterns with consistent processing.
         
@@ -150,6 +275,7 @@ class ClusterDiffractionAnalyzer:
             subtract_background: Whether to subtract global background
             recenter: Whether to recenter patterns to reference
             method: Averaging method ('mean', 'median')
+            recenter_each: Whether to recenter each pattern before averaging (reduces blur)
         """
         print("Computing cluster-averaged diffraction patterns...")
         
@@ -174,11 +300,42 @@ class ClusterDiffractionAnalyzer:
             # Extract patterns for this cluster
             cluster_data = self.data[cluster_indices]
             
+            # Optionally recenter each pattern before averaging (only if recentering is enabled)
+            if recenter_each and recenter and self.reference_center is not None:
+                print(f"  Recentering {n_pixels} patterns before averaging...")
+                aligned = []
+                ref_y, ref_x = self.reference_center
+                
+                for pattern in cluster_data:
+                    # Find center of this pattern
+                    center_y, center_x = self._find_beam_center(pattern)
+                    
+                    # Calculate shifts
+                    dy = ref_y - center_y
+                    dx = ref_x - center_x
+                    
+                    # Apply integer shifts using np.roll (fast)
+                    aligned_pattern = np.roll(np.roll(pattern, int(dy), axis=0), int(dx), axis=1)
+                    
+                    # Optional: apply subpixel shift for even better alignment
+                    # (disabled by default for speed)
+                    # fractional_dy = dy - int(dy)
+                    # fractional_dx = dx - int(dx)
+                    # if abs(fractional_dy) > 0.1 or abs(fractional_dx) > 0.1:
+                    #     from scipy import ndimage
+                    #     aligned_pattern = ndimage.shift(aligned_pattern, 
+                    #                                    (fractional_dy, fractional_dx), 
+                    #                                    order=1, cval=0)
+                    
+                    aligned.append(aligned_pattern)
+                
+                cluster_data = np.stack(aligned, axis=0)
+            
             # Compute average pattern
             if method == 'mean':
-                avg_pattern = np.mean(cluster_data, axis=0).astype(np.float64)
+                avg_pattern = np.mean(cluster_data, axis=0).astype(np.float32)
             elif method == 'median':
-                avg_pattern = np.median(cluster_data, axis=0).astype(np.float64)
+                avg_pattern = np.median(cluster_data, axis=0).astype(np.float32)
             else:
                 raise ValueError(f"Unknown averaging method: {method}")
             
@@ -205,7 +362,11 @@ class ClusterDiffractionAnalyzer:
         Returns:
             Processed pattern
         """
-        processed = pattern.copy()
+        # Convert to float32 if needed for processing
+        if pattern.dtype == np.float16:
+            processed = pattern.astype(np.float32)
+        else:
+            processed = pattern.copy().astype(np.float32)
         
         # 1. Normalize by total counts
         if normalize:
@@ -213,18 +374,30 @@ class ClusterDiffractionAnalyzer:
             if total_counts > 0:
                 processed = processed / total_counts
         
-        # 2. Subtract global background (estimate from pattern edges)
+        # 2. Subtract global background (estimate from high-radius annulus)
         if subtract_background:
-            # Use edge pixels as background estimate
-            edge_width = 5
-            edge_pixels = np.concatenate([
-                processed[:edge_width, :].flatten(),
-                processed[-edge_width:, :].flatten(),
-                processed[:, :edge_width].flatten(),
-                processed[:, -edge_width:].flatten()
-            ])
-            background = np.median(edge_pixels)
-            processed = np.maximum(processed - background, 0)
+            # Use high-radius annulus for robust background estimation
+            cy, cx = self.reference_center
+            H, W = processed.shape
+            yy, xx = np.mgrid[0:H, 0:W]
+            r = np.hypot(xx - cx, yy - cy)
+            r_in, r_out = 0.35 * min(H, W), 0.48 * min(H, W)  # thin outer ring
+            annulus_mask = (r >= r_in) & (r <= r_out)
+            
+            if np.sum(annulus_mask) > 0:
+                background = np.median(processed[annulus_mask])
+                processed = np.clip(processed - background, 0, None)
+            else:
+                # Fallback to edge pixels if annulus is empty
+                edge_width = 5
+                edge_pixels = np.concatenate([
+                    processed[:edge_width, :].flatten(),
+                    processed[-edge_width:, :].flatten(),
+                    processed[:, :edge_width].flatten(),
+                    processed[:, -edge_width:].flatten()
+                ])
+                background = np.median(edge_pixels)
+                processed = np.maximum(processed - background, 0)
         
         # 3. Recenter (shift to align with reference center)
         if recenter and self.reference_center is not None:
@@ -232,13 +405,13 @@ class ClusterDiffractionAnalyzer:
             dy = self.reference_center[0] - pattern_center[0]
             dx = self.reference_center[1] - pattern_center[1]
             
-            # Apply shift using scipy
+            # Apply shift using scipy (processed is already float32)
             processed = ndimage.shift(processed, (dy, dx), order=1, cval=0)
         
         return processed
     
     def create_cluster_comparison_plot(self, figsize=(20, 12), use_log=True, 
-                                     colormap='viridis') -> plt.Figure:
+                                     colormap='viridis', include_direction_labels=False) -> plt.Figure:
         """
         Create comprehensive comparison plot of all cluster patterns.
         
@@ -246,6 +419,7 @@ class ClusterDiffractionAnalyzer:
             figsize: Figure size
             use_log: Whether to use log scale for intensity
             colormap: Colormap for diffraction patterns
+            include_direction_labels: Whether to include direction labels in titles
             
         Returns:
             Matplotlib figure
@@ -292,6 +466,11 @@ class ClusterDiffractionAnalyzer:
         
         plot_idx += 1
         
+        # Get direction labels if requested
+        direction_labels = {}
+        if include_direction_labels:
+            direction_labels = self.compute_cluster_directions()
+        
         # Plot cluster patterns
         for cluster_id in sorted(self.cluster_patterns.keys()):
             if plot_idx >= rows * cols:
@@ -304,7 +483,13 @@ class ClusterDiffractionAnalyzer:
                 pattern = np.log(pattern + 1e-6)
             
             im = axes[row, col].imshow(pattern, cmap=colormap)
-            axes[row, col].set_title(f'Cluster {cluster_id}', fontweight='bold')
+            
+            # Create title with optional direction label
+            title = f'Cluster {cluster_id}'
+            if include_direction_labels and cluster_id in direction_labels:
+                title += f'\n({direction_labels[cluster_id]})'
+            
+            axes[row, col].set_title(title, fontweight='bold')
             axes[row, col].axis('off')
             plt.colorbar(im, ax=axes[row, col], shrink=0.6)
             
@@ -326,7 +511,7 @@ class ClusterDiffractionAnalyzer:
         plt.tight_layout()
         return fig
     
-    def create_difference_analysis(self, reference_cluster=None, figsize=(15, 10)) -> plt.Figure:
+    def create_difference_analysis(self, reference_cluster=None, figsize=(20, 12)) -> plt.Figure:
         """
         Create difference analysis between clusters and reference.
         
@@ -391,6 +576,227 @@ class ClusterDiffractionAnalyzer:
             axes[row, col].axis('off')
         
         fig.suptitle('Cluster Difference Analysis', fontsize=16, fontweight='bold', y=0.95)
+        plt.tight_layout()
+        return fig
+    
+    def create_enhanced_difference_analysis(self, figsize=(24, 16)) -> plt.Figure:
+        """
+        Create enhanced difference analysis with multiple visualization approaches.
+        
+        Args:
+            figsize: Figure size
+            
+        Returns:
+            Matplotlib figure with comprehensive difference analysis
+        """
+        if not self.cluster_patterns:
+            raise ValueError("No cluster patterns computed. Run compute_cluster_patterns() first.")
+        
+        # Prepare reference (scan average with same preprocessing)
+        reference = self._preprocess_pattern(self.reference_pattern, True, True, False)
+        
+        n_clusters = len(self.cluster_patterns)
+        cluster_ids = sorted(self.cluster_patterns.keys())
+        
+        # Create 4-row layout: raw differences, percentage differences, statistical significance, cumulative analysis
+        fig = plt.figure(figsize=figsize)
+        gs = fig.add_gridspec(4, n_clusters + 1, height_ratios=[1, 1, 1, 1], width_ratios=[1]*n_clusters + [0.3])
+        
+        # Row 1: Raw differences (enhanced contrast)
+        differences = {}
+        for i, cluster_id in enumerate(cluster_ids):
+            ax = fig.add_subplot(gs[0, i])
+            
+            pattern = self.cluster_patterns[cluster_id]
+            difference = pattern - reference
+            differences[cluster_id] = difference
+            
+            # Enhanced contrast using adaptive scaling
+            vmax = np.percentile(np.abs(difference), 98)  # More sensitive to outliers
+            im = ax.imshow(difference, cmap='RdBu_r', vmin=-vmax, vmax=vmax)
+            ax.set_title(f'Cluster {cluster_id}\nRaw Difference', fontweight='bold')
+            ax.axis('off')
+            
+            # Add beam center marker
+            ref_y, ref_x = self.reference_center
+            ax.plot(ref_x, ref_y, 'k+', markersize=8, markeredgewidth=2)
+        
+        # Colorbar for raw differences
+        cbar_ax1 = fig.add_subplot(gs[0, -1])
+        plt.colorbar(im, cax=cbar_ax1, label='Intensity Difference')
+        
+        # Row 2: Percentage differences (relative to reference)
+        for i, cluster_id in enumerate(cluster_ids):
+            ax = fig.add_subplot(gs[1, i])
+            
+            pattern = self.cluster_patterns[cluster_id]
+            # Avoid division by zero
+            relative_diff = (pattern - reference) / (reference + 1e-8) * 100
+            
+            # Clip extreme values for better visualization
+            vmax = np.percentile(np.abs(relative_diff), 95)
+            vmax = min(vmax, 200)  # Cap at 200% for readability
+            
+            im2 = ax.imshow(relative_diff, cmap='RdBu_r', vmin=-vmax, vmax=vmax)
+            ax.set_title(f'Cluster {cluster_id}\nRelative Difference (%)', fontweight='bold')
+            ax.axis('off')
+            ax.plot(ref_x, ref_y, 'k+', markersize=8, markeredgewidth=2)
+        
+        # Colorbar for percentage differences  
+        cbar_ax2 = fig.add_subplot(gs[1, -1])
+        plt.colorbar(im2, cax=cbar_ax2, label='Relative Difference (%)')
+        
+        # Row 3: Statistical significance map (Z-score-like measure)
+        # Estimate noise from edge regions of reference pattern
+        edge_width = 10
+        edge_pixels = np.concatenate([
+            reference[:edge_width, :].flatten(),
+            reference[-edge_width:, :].flatten(),
+            reference[:, :edge_width].flatten(),
+            reference[:, -edge_width:].flatten()
+        ])
+        noise_std = np.std(edge_pixels)
+        
+        for i, cluster_id in enumerate(cluster_ids):
+            ax = fig.add_subplot(gs[2, i])
+            
+            difference = differences[cluster_id]
+            # Statistical significance: difference relative to noise
+            significance = np.abs(difference) / (noise_std + 1e-8)
+            
+            # Log scale for significance
+            significance_log = np.log10(significance + 1)
+            
+            im3 = ax.imshow(significance_log, cmap='hot', vmin=0, vmax=np.percentile(significance_log, 95))
+            ax.set_title(f'Cluster {cluster_id}\nSignificance Map', fontweight='bold')
+            ax.axis('off')
+            ax.plot(ref_x, ref_y, 'k+', markersize=8, markeredgewidth=2)
+        
+        # Colorbar for significance
+        cbar_ax3 = fig.add_subplot(gs[2, -1])
+        plt.colorbar(im3, cax=cbar_ax3, label='log₁₀(|Diff|/Noise + 1)')
+        
+        # Row 4: Cumulative difference analysis
+        ax_cumulative = fig.add_subplot(gs[3, :n_clusters])
+        
+        # Compute cumulative differences in concentric rings
+        center_y, center_x = self.reference_center
+        max_radius = min(self.pattern_shape) // 2
+        radii = np.linspace(0, max_radius, 50)
+        
+        y_coords, x_coords = np.mgrid[0:self.pattern_shape[0], 0:self.pattern_shape[1]]
+        distances = np.sqrt((x_coords - center_x)**2 + (y_coords - center_y)**2)
+        
+        colors = plt.cm.tab10(np.linspace(0, 1, len(cluster_ids)))
+        
+        for i, cluster_id in enumerate(cluster_ids):
+            difference = differences[cluster_id]
+            cumulative_diff = np.zeros_like(radii)
+            
+            for j, r in enumerate(radii[1:], 1):
+                ring_mask = distances <= r
+                cumulative_diff[j] = np.sum(np.abs(difference[ring_mask]))
+            
+            # Normalize by area
+            cumulative_diff = cumulative_diff / (np.pi * radii**2 + 1e-8)
+            
+            ax_cumulative.plot(radii, cumulative_diff, color=colors[i], linewidth=3,
+                             label=f'Cluster {cluster_id}', marker='o', markersize=4)
+        
+        ax_cumulative.set_xlabel('Radius from Beam Center (pixels)')
+        ax_cumulative.set_ylabel('Cumulative |Difference| / Area')
+        ax_cumulative.set_title('Radial Cumulative Difference Analysis')
+        ax_cumulative.legend()
+        ax_cumulative.grid(True, alpha=0.3)
+        
+        # Add overall title
+        fig.suptitle('Enhanced Cluster Difference Analysis', fontsize=20, fontweight='bold', y=0.98)
+        
+        plt.tight_layout()
+        return fig
+    
+    def create_feature_highlight_analysis(self, figsize=(20, 8)) -> plt.Figure:
+        """
+        Create analysis highlighting specific diffraction features.
+        
+        Args:
+            figsize: Figure size
+            
+        Returns:
+            Matplotlib figure with feature-enhanced visualization
+        """
+        if not self.cluster_patterns:
+            raise ValueError("No cluster patterns computed. Run compute_cluster_patterns() first.")
+        
+        reference = self._preprocess_pattern(self.reference_pattern, True, True, False)
+        cluster_ids = sorted(self.cluster_patterns.keys())
+        
+        # Create 2x(n_clusters) layout
+        fig, axes = plt.subplots(2, len(cluster_ids), figsize=figsize)
+        if len(cluster_ids) == 1:
+            axes = axes.reshape(2, 1)
+        
+        # Top row: High-contrast difference (enhanced for weak features)
+        for i, cluster_id in enumerate(cluster_ids):
+            ax = axes[0, i]
+            
+            pattern = self.cluster_patterns[cluster_id]
+            difference = pattern - reference
+            
+            # Apply edge enhancement to highlight structural differences
+            from scipy import ndimage
+            # Create a Laplacian filter to enhance edges/features
+            laplacian_kernel = np.array([[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]])
+            enhanced_diff = ndimage.convolve(difference, laplacian_kernel, mode='constant')
+            
+            # Normalize and enhance contrast
+            enhanced_diff = enhanced_diff / (np.std(enhanced_diff) + 1e-8)
+            vmax = np.percentile(np.abs(enhanced_diff), 97)
+            
+            im = ax.imshow(enhanced_diff, cmap='RdBu_r', vmin=-vmax, vmax=vmax)
+            ax.set_title(f'Cluster {cluster_id}\nEdge-Enhanced Differences', fontweight='bold')
+            ax.axis('off')
+            
+            # Mark beam center
+            ref_y, ref_x = self.reference_center
+            ax.plot(ref_x, ref_y, 'k+', markersize=8, markeredgewidth=2)
+            
+            plt.colorbar(im, ax=ax, shrink=0.6)
+        
+        # Bottom row: Ratio analysis (cluster/reference)
+        for i, cluster_id in enumerate(cluster_ids):
+            ax = axes[1, i]
+            
+            pattern = self.cluster_patterns[cluster_id]
+            # Compute ratio with smoothing to avoid noise amplification
+            smoothed_reference = ndimage.gaussian_filter(reference, sigma=1.0)
+            smoothed_pattern = ndimage.gaussian_filter(pattern, sigma=1.0)
+            
+            ratio = smoothed_pattern / (smoothed_reference + 1e-6)
+            
+            # Log scale ratio for better visualization
+            log_ratio = np.log2(ratio + 1e-6)
+            
+            # Symmetric limits around 1 (log2(1) = 0)
+            vmax = np.percentile(np.abs(log_ratio), 95)
+            vmax = min(vmax, 2)  # Cap at 4x difference
+            
+            im = ax.imshow(log_ratio, cmap='RdBu_r', vmin=-vmax, vmax=vmax)
+            ax.set_title(f'Cluster {cluster_id}\nIntensity Ratio (log₂)', fontweight='bold')
+            ax.axis('off')
+            
+            ax.plot(ref_x, ref_y, 'k+', markersize=8, markeredgewidth=2)
+            
+            # Add ratio colorbar with interpretable labels
+            cbar = plt.colorbar(im, ax=ax, shrink=0.6)
+            
+            # Add ratio interpretation labels
+            tick_positions = [-2, -1, 0, 1, 2]
+            tick_labels = ['¼×', '½×', '1×', '2×', '4×']
+            cbar.set_ticks([t for t in tick_positions if -vmax <= t <= vmax])
+            cbar.set_ticklabels([tick_labels[i] for i, t in enumerate(tick_positions) if -vmax <= t <= vmax])
+        
+        fig.suptitle('Feature-Enhanced Cluster Analysis', fontsize=16, fontweight='bold', y=0.95)
         plt.tight_layout()
         return fig
     
@@ -544,11 +950,96 @@ class ClusterDiffractionAnalyzer:
         if self.reference_pattern is not None:
             np.save(output_path / "reference_pattern.npy", self.reference_pattern)
         
-        # Save statistics
+        # Save statistics in portable NPZ format
         stats = self.compute_cluster_statistics()
-        np.save(output_path / "cluster_statistics.npy", stats)
+        
+        # Extract arrays for NPZ format
+        arrays_to_save = {
+            'correlation_matrix': stats['correlation_matrix'],
+            'cluster_ids': np.array(stats['cluster_ids'], dtype=int)
+        }
+        
+        # Add per-cluster statistics as arrays
+        for cluster_id in stats['cluster_ids']:
+            cluster_stats = stats[f'cluster_{cluster_id}']
+            for stat_name, value in cluster_stats.items():
+                arrays_to_save[f'cluster_{cluster_id}_{stat_name}'] = np.array(value)
+        
+        np.savez(output_path / "cluster_statistics.npz", **arrays_to_save)
+        
+        # Optionally save metadata as JSON for complete portability
+        import json
+        metadata = {
+            'cluster_ids': [int(x) for x in stats['cluster_ids']],
+            'n_clusters': len(stats['cluster_ids']),
+            'analysis_type': 'cluster_averaged_diffraction'
+        }
+        
+        with open(output_path / "analysis_metadata.json", 'w') as f:
+            json.dump(metadata, f, indent=2)
         
         print("Analysis results saved successfully")
+    
+    def guess_direction(self, pattern: np.ndarray, center: Tuple[int, int], 
+                       r_in_frac: float = 0.15, r_out_frac: float = 0.45) -> str:
+        """
+        Guess crystal orientation direction based on intensity asymmetry.
+        
+        Args:
+            pattern: Diffraction pattern
+            center: Beam center coordinates (y, x)
+            r_in_frac: Inner radius fraction of pattern size
+            r_out_frac: Outer radius fraction of pattern size
+            
+        Returns:
+            Direction label: "horizontal", "vertical", or "out-of-plane"
+        """
+        H, W = pattern.shape
+        cy, cx = center
+        yy, xx = np.mgrid[0:H, 0:W]
+        rr = np.hypot(xx - cx, yy - cy)
+        
+        r_in = r_in_frac * min(H, W)
+        r_out = r_out_frac * min(H, W)
+        ring = (rr >= r_in) & (rr <= r_out)
+        
+        # Calculate average intensities in different quadrants
+        left = pattern[ring & (xx < cx)].mean()
+        right = pattern[ring & (xx > cx)].mean()
+        top = pattern[ring & (yy < cy)].mean()
+        bottom = pattern[ring & (yy > cy)].mean()
+        
+        # Calculate asymmetry measures
+        lr_asymmetry = abs(left - right)
+        tb_asymmetry = abs(top - bottom)
+        
+        # Classify based on dominant asymmetry
+        if lr_asymmetry > 1.2 * tb_asymmetry:
+            return "horizontal"
+        elif tb_asymmetry > 1.2 * lr_asymmetry:
+            return "vertical"
+        else:
+            return "out-of-plane"
+    
+    def compute_cluster_directions(self) -> Dict[int, str]:
+        """
+        Compute qualitative direction labels for all clusters.
+        
+        Returns:
+            Dictionary mapping cluster_id to direction string
+        """
+        if not self.cluster_patterns:
+            raise ValueError("No cluster patterns computed. Run compute_cluster_patterns() first.")
+        
+        directions = {}
+        print("Computing qualitative direction labels...")
+        
+        for cluster_id, pattern in self.cluster_patterns.items():
+            direction = self.guess_direction(pattern, self.reference_center)
+            directions[cluster_id] = direction
+            print(f"  Cluster {cluster_id}: {direction}")
+        
+        return directions
 
 
 def load_h5_data(h5_path: str) -> Tuple[np.ndarray, Tuple[int, int], Dict[str, Any]]:
@@ -609,6 +1100,12 @@ Examples:
   
   # Use median averaging and custom normalization
   python cluster_diffraction_analysis.py data.h5 cluster_labels.npy --method median --no-normalize
+  
+  # Interactive beam center selection
+  python cluster_diffraction_analysis.py data.h5 cluster_labels.npy --interactive-center
+  
+  # With qualitative direction labeling and robust centering
+  python cluster_diffraction_analysis.py data.h5 cluster_labels.npy --label-guess --recenter-each
         """
     )
     
@@ -623,11 +1120,22 @@ Examples:
     parser.add_argument('--no-background', action='store_true', 
                        help='Skip background subtraction')
     parser.add_argument('--no-recenter', action='store_true',
-                       help='Skip recentering')
+                       help='Skip all recentering operations (both individual and final)')
     parser.add_argument('--colormap', default='viridis',
                        help='Colormap for diffraction patterns (default: viridis)')
+    parser.add_argument('--interactive-center', action='store_true',
+                       help='Interactive beam center selection')
+    parser.add_argument('--recenter-each', action='store_true',
+                       help='Recenter each pattern before averaging (requires recentering enabled, reduces blur)')
+    parser.add_argument('--label-guess', action='store_true',
+                       help='Include qualitative orientation labels (horizontal/vertical/out-of-plane)')
     
     args = parser.parse_args()
+    
+    # Validate argument combinations
+    if args.recenter_each and args.no_recenter:
+        print("Warning: --recenter-each has no effect when --no-recenter is used")
+        print("Either remove --no-recenter to enable recentering, or remove --recenter-each")
     
     try:
         # Load data
@@ -645,13 +1153,20 @@ Examples:
         # Create analyzer
         analyzer = ClusterDiffractionAnalyzer(data, scan_shape, cluster_labels)
         
+        # Interactive beam center selection if requested
+        if args.interactive_center:
+            print("\nStarting interactive beam center selection...")
+            analyzer.compute_reference_pattern(method='mean')  # Ensure reference is computed
+            analyzer.interactive_beam_center_selection()
+        
         # Compute cluster patterns
         print("\nComputing cluster-averaged diffraction patterns...")
         analyzer.compute_cluster_patterns(
             normalize=not args.no_normalize,
             subtract_background=not args.no_background,
             recenter=not args.no_recenter,
-            method=args.method
+            method=args.method,
+            recenter_each=args.recenter_each
         )
         
         # Create output directory
@@ -660,7 +1175,10 @@ Examples:
         
         # Create visualizations
         print("\nCreating cluster comparison plot...")
-        fig1 = analyzer.create_cluster_comparison_plot(colormap=args.colormap)
+        fig1 = analyzer.create_cluster_comparison_plot(
+            colormap=args.colormap, 
+            include_direction_labels=args.label_guess
+        )
         fig1.savefig(output_path / "cluster_patterns_comparison.png", dpi=300, bbox_inches='tight')
         plt.close(fig1)
         
@@ -668,6 +1186,16 @@ Examples:
         fig2 = analyzer.create_difference_analysis()
         fig2.savefig(output_path / "cluster_differences.png", dpi=300, bbox_inches='tight')
         plt.close(fig2)
+        
+        print("Creating enhanced difference analysis...")
+        fig4 = analyzer.create_enhanced_difference_analysis()
+        fig4.savefig(output_path / "enhanced_cluster_differences.png", dpi=300, bbox_inches='tight')
+        plt.close(fig4)
+        
+        print("Creating feature-enhanced analysis...")
+        fig5 = analyzer.create_feature_highlight_analysis()
+        fig5.savefig(output_path / "feature_enhanced_differences.png", dpi=300, bbox_inches='tight')
+        plt.close(fig5)
         
         print("Creating radial profile comparison...")
         fig3 = analyzer.create_radial_profile_comparison()
@@ -686,6 +1214,13 @@ Examples:
         print(f"Number of clusters: {len(analyzer.unique_clusters)}")
         print(f"Cluster IDs: {analyzer.unique_clusters}")
         
+        # Print direction labels if requested
+        if args.label_guess:
+            print("\nCluster Direction Labels:")
+            direction_labels = analyzer.compute_cluster_directions()
+            for cluster_id in sorted(direction_labels.keys()):
+                print(f"  Cluster {cluster_id}: {direction_labels[cluster_id]}")
+        
         # Print cluster statistics
         for cluster_id in sorted(analyzer.cluster_patterns.keys()):
             cluster_stats = stats[f'cluster_{cluster_id}']
@@ -697,11 +1232,15 @@ Examples:
         
         print(f"\nResults saved to: {output_path}")
         print("Generated files:")
-        print("  - cluster_patterns_comparison.png: Side-by-side cluster patterns")
-        print("  - cluster_differences.png: Difference maps vs reference")
+        print("  - cluster_patterns_comparison.png: Side-by-side cluster patterns (with optional direction labels)")
+        print("  - cluster_differences.png: Basic difference maps vs reference")
+        print("  - enhanced_cluster_differences.png: Multi-level enhanced difference analysis")
+        print("  - feature_enhanced_differences.png: Edge-enhanced and ratio analysis")
         print("  - radial_profiles.png: Radial profile analysis")
         print("  - cluster_patterns.npz: Computed cluster patterns")
-        print("  - cluster_statistics.npy: Statistical analysis")
+        print("  - cluster_statistics.npz: Statistical analysis (NPZ format)")
+        print("  - analysis_metadata.json: Portable metadata")
+        print("  - reference_pattern.npy: Reference diffraction pattern")
         
         return 0
         
