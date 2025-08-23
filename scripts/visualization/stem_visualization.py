@@ -583,10 +583,12 @@ class STEMVisualizer:
         ax.set_yscale('log')
         
         # Add more tick marks with numerical labels on y-axis (intensity)
-        from matplotlib.ticker import LogLocator, LogFormatterMathText
+        from matplotlib.ticker import LogLocator, ScalarFormatter
         ax.yaxis.set_major_locator(LogLocator(base=10.0, numticks=10))
         ax.yaxis.set_minor_locator(LogLocator(base=10.0, subs=[2, 3, 4, 5, 6, 7, 8, 9], numticks=10))
-        ax.yaxis.set_major_formatter(LogFormatterMathText(base=10.0))
+        formatter = ScalarFormatter()
+        formatter.set_scientific(True)
+        ax.yaxis.set_major_formatter(formatter)
         ax.grid(True, which='major', alpha=0.3)
         ax.grid(True, which='minor', alpha=0.1)
         
@@ -863,29 +865,35 @@ class STEMVisualizer:
         self.create_detector_schematic(axes[0, 3])
         
         # Row 2: Virtual images from all detector types
-        # 1. Bright field image
+        # 1. Bright field image with scalebar
         bf_image = self.create_bright_field_image()
         im3 = axes[1, 0].imshow(bf_image, cmap='gray')
         axes[1, 0].set_title('Virtual Bright Field')
         axes[1, 0].axis('off')
         cbar3 = plt.colorbar(im3, ax=axes[1, 0], shrink=0.6)
         cbar3.set_label('Intensity (counts)', rotation=270, labelpad=15)
+        # Add professional scalebar
+        self._add_scalebar(axes[1, 0], pattern_scale=False)
         
-        # 2. Conventional Dark field image
+        # 2. Conventional Dark field image with scalebar
         df_image = self.create_dark_field_image(*self.dark_field_region[2:4])
         im4 = axes[1, 1].imshow(df_image, cmap='hot')
         axes[1, 1].set_title('Virtual Dark Field')
         axes[1, 1].axis('off')
         cbar4 = plt.colorbar(im4, ax=axes[1, 1], shrink=0.6)
         cbar4.set_label('Intensity (counts)', rotation=270, labelpad=15)
+        # Add professional scalebar
+        self._add_scalebar(axes[1, 1], pattern_scale=False)
         
-        # 3. HAADF image
+        # 3. HAADF image with scalebar
         haadf_image = self.create_haadf_image()
         im5 = axes[1, 2].imshow(haadf_image, cmap='plasma')
         axes[1, 2].set_title('Virtual HAADF (Z-contrast)')
         axes[1, 2].axis('off')
         cbar5 = plt.colorbar(im5, ax=axes[1, 2], shrink=0.6)
         cbar5.set_label('Intensity (counts)', rotation=270, labelpad=15)
+        # Add professional scalebar
+        self._add_scalebar(axes[1, 2], pattern_scale=False)
         
         # 4. Composite: BF vs HAADF
         composite = self.create_composite_image(bf_image, haadf_image, mode='rgb')
@@ -1042,7 +1050,7 @@ class STEMVisualizer:
         print(f"Center: {self.direct_beam_position}, Radius: {self.bragg_radius:.1f}")
     
     def _add_scalebar(self, ax, pattern_scale=False):
-        """Add simple, clean scalebar to the plot."""
+        """Add simple, professional scalebar to the plot."""
         if pattern_scale:
             # For diffraction patterns - reciprocal space units
             pattern_size = min(self.pattern_shape)
@@ -1050,21 +1058,46 @@ class STEMVisualizer:
             # Convert pixels to reciprocal space units (nm^-1)
             # Assuming typical STEM detector calibration: ~0.01 nm^-1 per pixel
             reciprocal_scale = scale_pixels * 0.01
+            
+            # Round to nice numbers for reciprocal space
+            if reciprocal_scale >= 1.0:
+                reciprocal_scale = round(reciprocal_scale, 1)
+            elif reciprocal_scale >= 0.1:
+                reciprocal_scale = round(reciprocal_scale, 2)
+            else:
+                reciprocal_scale = round(reciprocal_scale, 3)
+            
             scale_length = f"{reciprocal_scale:.2f} nm⁻¹"
             image_size = pattern_size
         else:
-            # For real space images
-            scale_pixels = self.scalebar_info['scale_length'] 
-            scale_length = f"{scale_pixels} {self.scalebar_info['units']}"
-            image_size = self.scalebar_info['width']
+            # For real space images - use scan dimensions
+            scan_height, scan_width = self.scan_shape if hasattr(self, 'scan_shape') else (256, 256)
+            # CORRECTED: Real-space pixel size is 4nm (as specified by user)
+            pixel_size_nm = 4.0  # nm per pixel 
+            scale_length_nm = min(scan_width, scan_height) * pixel_size_nm * 0.2  # 20% of image width
+            
+            # Round to nice numbers for real space
+            if scale_length_nm >= 1000:
+                scale_length_nm = round(scale_length_nm / 100) * 100  # Round to 100s nm
+                scale_label = f"{int(scale_length_nm/1000)} μm" if scale_length_nm >= 1000 else f"{int(scale_length_nm)} nm"
+            elif scale_length_nm >= 100:
+                scale_length_nm = round(scale_length_nm / 50) * 50   # Round to 50s nm
+                scale_label = f"{int(scale_length_nm)} nm"
+            else:
+                scale_length_nm = round(scale_length_nm / 10) * 10   # Round to 10s nm
+                scale_label = f"{int(scale_length_nm)} nm"
+            
+            scale_pixels = scale_length_nm / pixel_size_nm
+            scale_length = scale_label
+            image_size = min(scan_width, scan_height)
         
         # Get axis limits
         x_lim, y_lim = ax.get_xlim(), ax.get_ylim()
         x_size = abs(x_lim[1] - x_lim[0])
         y_size = abs(y_lim[1] - y_lim[0])
         
-        # Calculate scalebar position (bottom left to avoid legend conflict)
-        margin_x = 0.05  # 5% margin from edges
+        # Position scalebar (bottom left to avoid colorbar/legend overlap)
+        margin_x = 0.05  # 5% margin from left edge  
         margin_y = 0.08  # 8% margin from bottom
         
         # Scalebar length as fraction of image
@@ -1077,25 +1110,18 @@ class STEMVisualizer:
         x_end = x_start + bar_width
         y_bar = y_lim[0] + margin_y * y_size
         
-        # Simple, clean scalebar design
+        # Professional minimalist design - SAME FOR ALL IMAGES
         bar_thickness = 3
         
-        # Main bar (white with black outline)
-        ax.plot([x_start, x_end], [y_bar, y_bar], 'white', linewidth=bar_thickness+2, solid_capstyle='round')
-        ax.plot([x_start, x_end], [y_bar, y_bar], 'black', linewidth=bar_thickness, solid_capstyle='round')
+        # Main bar - simple white line with subtle shadow
+        ax.plot([x_start, x_end], [y_bar-0.5, y_bar-0.5], 'black', linewidth=bar_thickness+1, alpha=0.3, solid_capstyle='butt')
+        ax.plot([x_start, x_end], [y_bar, y_bar], 'white', linewidth=bar_thickness, solid_capstyle='butt')
         
-        # Simple end ticks
-        tick_height = 4
-        ax.plot([x_start, x_start], [y_bar - tick_height/2, y_bar + tick_height/2], 'white', linewidth=bar_thickness+1)
-        ax.plot([x_start, x_start], [y_bar - tick_height/2, y_bar + tick_height/2], 'black', linewidth=bar_thickness-1)
-        ax.plot([x_end, x_end], [y_bar - tick_height/2, y_bar + tick_height/2], 'white', linewidth=bar_thickness+1)
-        ax.plot([x_end, x_end], [y_bar - tick_height/2, y_bar + tick_height/2], 'black', linewidth=bar_thickness-1)
-        
-        # Simple text label with better spacing to avoid overlap
-        label_y = y_bar + tick_height/2 + 0.035 * y_size  # Increased spacing
+        # Clean text label - consistent styling for all scalebars
+        label_y = y_bar - 0.02 * y_size  # Place below the bar
         ax.text((x_start + x_end) / 2, label_y, scale_length,
-                ha='center', va='bottom', color='white', fontsize=8, weight='bold',
-                bbox=dict(boxstyle='round,pad=0.15', facecolor='black', alpha=0.7))
+                ha='center', va='top', color='white', fontsize=9, weight='bold',
+                bbox=dict(boxstyle='round,pad=0.2', facecolor='black', edgecolor='none', alpha=0.8))
 
     def plot_mean_diffraction_pattern(self, ax=None, show_regions=True, use_log=True, add_scalebar=False):
         """Plot mean diffraction pattern with field regions."""
