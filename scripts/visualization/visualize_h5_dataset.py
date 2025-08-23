@@ -116,7 +116,7 @@ def infer_scan_shape(data_shape: Tuple[int, ...]) -> Tuple[int, int]:
         raise ValueError(f"Unexpected data shape: {data_shape}")
 
 
-def create_visualization(visualizer: STEMVisualizer, output_path: str, metadata: Optional[Dict[str, Any]] = None):
+def create_visualization(visualizer: STEMVisualizer, output_path: str, metadata: Optional[Dict[str, Any]] = None, detectors: Optional[list] = None):
     """
     Create comprehensive visualization of the 4D-STEM dataset using STEMVisualizer methods.
     
@@ -124,6 +124,7 @@ def create_visualization(visualizer: STEMVisualizer, output_path: str, metadata:
         visualizer: Pre-configured STEMVisualizer instance
         output_path: Path to save the visualization
         metadata: Optional metadata dictionary
+        detectors: List of detectors to include in visualization
     """
     print("Creating visualization with configured STEMVisualizer...")
     
@@ -131,11 +132,15 @@ def create_visualization(visualizer: STEMVisualizer, output_path: str, metadata:
     print(f"Pattern shape: {visualizer.pattern_shape}")
     print(f"Scan shape: {visualizer.scan_shape}")
     
+    if detectors:
+        print(f"Selected detectors: {', '.join(detectors).upper()}")
+    
     # Use the comprehensive visualization method from STEMVisualizer
     fig = visualizer.create_comprehensive_visualization(
         figsize=(20, 10), 
         include_metadata=True, 
-        metadata=metadata
+        metadata=metadata,
+        detectors=detectors
     )
     
     # Save figure
@@ -143,11 +148,10 @@ def create_visualization(visualizer: STEMVisualizer, output_path: str, metadata:
     fig.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
     
-    # Return the virtual images for summary statistics
-    bf_image = visualizer.create_bright_field_image()
-    center_y, center_x, inner_radius, outer_radius = visualizer.dark_field_region
-    df_image = visualizer.create_dark_field_image(inner_radius, outer_radius)
-    haadf_image = visualizer.create_haadf_image()
+    # Return the virtual images for summary statistics (create only requested ones)
+    bf_image = visualizer.create_bright_field_image() if not detectors or 'bf' in detectors else None
+    df_image = visualizer.create_dark_field_image() if not detectors or 'df' in detectors else None  
+    haadf_image = visualizer.create_haadf_image() if not detectors or 'haadf' in detectors else None
     
     return bf_image, df_image, haadf_image
 
@@ -209,11 +213,17 @@ Examples:
   # Interactive beam center detection (recommended for precise results)
   python visualize_h5_dataset.py data.h5 --interactive-center
   
+  # Interactive detector geometry setup (recommended for precise control)
+  python visualize_h5_dataset.py data.h5 --interactive-detectors
+  
   # Specify output file
   python visualize_h5_dataset.py data.h5 --output my_results.png
   
   # Custom detector radii
   python visualize_h5_dataset.py data.h5 --bf-radius 15 --df-inner 20 --df-outer 50
+  
+  # Select only BF and DF detectors (no HAADF or composite)
+  python visualize_h5_dataset.py data.h5 --detectors bf df
         """
     )
     
@@ -232,6 +242,12 @@ Examples:
                        help='Only print dataset information, skip visualization')
     parser.add_argument('--interactive-center', action='store_true',
                        help='Interactive beam center and radius detection (click center, then edge)')
+    parser.add_argument('--interactive-detectors', action='store_true',
+                       help='Interactive detector geometry setup (positions and sizes for all detectors)')
+    parser.add_argument('--detectors', nargs='+', 
+                       choices=['bf', 'df', 'haadf', 'composite'], 
+                       default=['bf', 'df', 'haadf', 'composite'],
+                       help='Select which detectors to include in visualization (default: all)')
     
     args = parser.parse_args()
     
@@ -289,6 +305,12 @@ Examples:
             visualizer.apply_interactive_detection()
             print(f"Interactive detection complete: center={visualizer.direct_beam_position}, radius={visualizer.bragg_radius:.1f}")
         
+        # Interactive detector setup if requested
+        if args.interactive_detectors:
+            print("Starting interactive detector geometry setup...")
+            visualizer.apply_interactive_detector_setup()
+            print("Interactive detector setup complete!")
+        
         # Set custom detector parameters if provided
         if args.bf_radius is not None:
             print(f"Using custom bright field radius: {args.bf_radius}")
@@ -300,22 +322,30 @@ Examples:
         
         # Create visualization using the configured visualizer
         bf_image, df_image, haadf_image = create_visualization(
-            visualizer, str(output_path), external_metadata
+            visualizer, str(output_path), external_metadata, args.detectors
         )
         
         # Print results summary
         print("\n" + "="*60)
         print("RESULTS SUMMARY")
         print("="*60)
-        print(f"Bright field intensity range: [{bf_image.min():.1f}, {bf_image.max():.1f}]")
-        print(f"Dark field intensity range: [{df_image.min():.1f}, {df_image.max():.1f}]")
-        print(f"HAADF intensity range: [{haadf_image.min():.1f}, {haadf_image.max():.1f}]")
+        
+        if bf_image is not None:
+            print(f"Bright field intensity range: [{bf_image.min():.1f}, {bf_image.max():.1f}]")
+            print(f"BF detector: r={visualizer.bragg_radius*0.8:.1f}px")
+        
+        if df_image is not None:
+            print(f"Dark field intensity range: [{df_image.min():.1f}, {df_image.max():.1f}]")
+            df_inner, df_outer = visualizer.dark_field_region[2:4]
+            print(f"DF detector: r={df_inner:.1f}-{df_outer:.1f}px")
+        
+        if haadf_image is not None:
+            print(f"HAADF intensity range: [{haadf_image.min():.1f}, {haadf_image.max():.1f}]")
+            haadf_inner, haadf_outer = visualizer.haadf_region[2:4]
+            print(f"HAADF detector: r={haadf_inner:.1f}-{haadf_outer:.1f}px")
+        
         print(f"Bragg spot radius: {visualizer.bragg_radius:.1f} pixels")
-        print(f"BF detector: r={visualizer.bragg_radius*0.8:.1f}px")
-        df_inner, df_outer = visualizer.dark_field_region[2:4]
-        print(f"DF detector: r={df_inner:.1f}-{df_outer:.1f}px")
-        haadf_inner, haadf_outer = visualizer.haadf_region[2:4]
-        print(f"HAADF detector: r={haadf_inner:.1f}-{haadf_outer:.1f}px")
+        print(f"Selected detectors: {', '.join(args.detectors).upper()}")
         print(f"Visualization saved: {output_path}")
         
         return 0
