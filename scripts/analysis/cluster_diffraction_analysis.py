@@ -29,6 +29,7 @@ from typing import Tuple, Dict, List, Optional, Any
 from scipy import ndimage
 from sklearn.preprocessing import StandardScaler
 from matplotlib.patches import Circle
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 import seaborn as sns
 
 # Add parent directory to path for imports
@@ -867,6 +868,103 @@ class ClusterDiffractionAnalyzer:
         plt.tight_layout()
         return fig
     
+    def create_bias_corrected_visualization(self, figsize=(20, 12), use_log=True,
+                                          colormap='viridis', contrast_percentile=95) -> plt.Figure:
+        """
+        Create visualization of cluster patterns minus scan-average to check for global bias.
+        This highlights unique cluster features by removing common background and reveals
+        ghost half-integer disks that might be overshadowed by fundamental reflections.
+        
+        Args:
+            figsize: Figure size
+            use_log: Whether to use log scale for display
+            colormap: Colormap to use
+            contrast_percentile: Percentile for contrast adjustment
+            
+        Returns:
+            Matplotlib figure
+        """
+        if not self.cluster_patterns:
+            raise ValueError("No cluster patterns computed. Run compute_cluster_patterns() first.")
+        
+        n_clusters = len(self.cluster_patterns)
+        n_cols = min(n_clusters, 4)
+        n_rows = (n_clusters + n_cols - 1) // n_cols
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
+        # Ensure axes is always a flat array for consistent indexing
+        if n_clusters == 1:
+            axes = np.array([axes])
+        else:
+            axes = np.array(axes).flatten()
+        
+        # Get reference pattern (scan average) - preprocess to match cluster preprocessing
+        reference = self._preprocess_pattern(self.reference_pattern, True, True, False)
+        
+        cluster_ids = sorted(self.cluster_patterns.keys())
+        
+        # Compute cluster counts
+        flat_labels = self.cluster_labels.flatten()
+        cluster_counts = {cluster_id: np.sum(flat_labels == cluster_id) 
+                         for cluster_id in cluster_ids}
+        
+        # Compute all bias-corrected patterns first for global color scaling
+        bias_corr_list = []
+        for cluster_id in cluster_ids:
+            cluster_pattern = self.cluster_patterns[cluster_id]
+            bias_corr_list.append(cluster_pattern - reference)
+        
+        # Apply log scale if requested
+        if use_log:
+            disp_list = [np.sign(b) * np.log10(1 + np.abs(b)) for b in bias_corr_list]
+        else:
+            disp_list = bias_corr_list
+        
+        # Choose ONE symmetric range for all panels
+        global_v = np.percentile(np.abs(np.concatenate([d.ravel() for d in disp_list])), contrast_percentile)
+        vmin, vmax = -global_v, global_v
+        
+        for i, cluster_id in enumerate(cluster_ids):
+            ax = axes[i]
+            
+            # Use diverging colormap for better difference visualization
+            cmap_to_use = 'RdBu_r' if use_log else colormap
+            
+            im = ax.imshow(disp_list[i], cmap=cmap_to_use, vmin=vmin, vmax=vmax,
+                          origin='lower', interpolation='nearest')
+            
+            # Add beam center marker
+            if hasattr(self, 'reference_center') and self.reference_center is not None:
+                center_y, center_x = self.reference_center
+                ax.plot(center_x, center_y, 'r+', markersize=8, markeredgewidth=2)
+            
+            ax.set_title(f'Cluster {cluster_id} - Scan Average\n(n={cluster_counts[cluster_id]})', 
+                        fontsize=10)
+            ax.axis('off')
+            
+            # Add colorbar
+            divider = make_axes_locatable(ax)
+            cax = divider.append_axes("right", size="5%", pad=0.05)
+            cbar = plt.colorbar(im, cax=cax)
+            cax.tick_params(labelsize=8)
+            if use_log:
+                cbar.set_label('Log₁₀(Intensity Difference)', fontsize=8)
+            else:
+                cbar.set_label('Intensity Difference', fontsize=8)
+        
+        # Hide unused subplots
+        for i in range(len(cluster_ids), len(axes)):
+            axes[i].axis('off')
+        
+        # Main title
+        log_text = " (Log Scale)" if use_log else ""
+        fig.suptitle(f'Cluster Patterns - Scan Average{log_text}\n'
+                    f'Highlights unique cluster features and removes global bias', 
+                    fontsize=14, y=0.95)
+        
+        plt.tight_layout()
+        return fig
+    
     def _compute_radial_profile(self, pattern: np.ndarray, distances: np.ndarray, 
                                radii: np.ndarray) -> np.ndarray:
         """
@@ -1040,6 +1138,55 @@ class ClusterDiffractionAnalyzer:
             print(f"  Cluster {cluster_id}: {direction}")
         
         return directions
+    
+    def diagnose_label_alignment(self) -> Dict[str, float]:
+        """
+        Diagnose potential label misalignment by checking cluster pattern similarity.
+        
+        Returns:
+            Dictionary with diagnostic metrics
+        """
+        if not self.cluster_patterns:
+            raise ValueError("No cluster patterns computed. Run compute_cluster_patterns() first.")
+        
+        # Compute cross-correlations between cluster patterns
+        cluster_ids = sorted(self.cluster_patterns.keys())
+        n_clusters = len(cluster_ids)
+        
+        correlations = []
+        for i, id1 in enumerate(cluster_ids):
+            for j, id2 in enumerate(cluster_ids):
+                if i < j:  # Only upper triangle
+                    pattern1 = self.cluster_patterns[id1].flatten()
+                    pattern2 = self.cluster_patterns[id2].flatten()
+                    correlation = np.corrcoef(pattern1, pattern2)[0, 1]
+                    correlations.append(correlation)
+        
+        avg_correlation = np.mean(correlations)
+        min_correlation = np.min(correlations)
+        
+        diagnostics = {
+            'average_cross_correlation': avg_correlation,
+            'minimum_cross_correlation': min_correlation,
+            'n_clusters': n_clusters,
+            'alignment_quality': 'GOOD' if avg_correlation < 0.9 else 'SUSPICIOUS'
+        }
+        
+        print("\n" + "="*50)
+        print("LABEL ALIGNMENT DIAGNOSTICS")
+        print("="*50)
+        print(f"Average cross-correlation: {avg_correlation:.3f}")
+        print(f"Minimum cross-correlation: {min_correlation:.3f}")
+        print(f"Alignment quality: {diagnostics['alignment_quality']}")
+        
+        if avg_correlation > 0.9:
+            print("⚠️  WARNING: High cross-correlation suggests misaligned labels!")
+            print("   All cluster patterns look too similar (like global average)")
+            print("   Try running with --flip-labels to test coordinate alignment")
+        else:
+            print("✓ Good cluster distinctiveness - labels appear correctly aligned")
+        
+        return diagnostics
 
 
 def load_h5_data(h5_path: str) -> Tuple[np.ndarray, Tuple[int, int], Dict[str, Any]]:
@@ -1106,6 +1253,12 @@ Examples:
   
   # With qualitative direction labeling and robust centering
   python cluster_diffraction_analysis.py data.h5 cluster_labels.npy --label-guess --recenter-each
+  
+  # Troubleshoot scan coordinate alignment (if clusters look too similar)
+  python cluster_diffraction_analysis.py data.h5 cluster_labels.npy --flip-labels
+  
+  # Manual scan shape override (if auto-inference is wrong)
+  python cluster_diffraction_analysis.py data.h5 cluster_labels.npy --scan-shape 209 194
         """
     )
     
@@ -1129,6 +1282,10 @@ Examples:
                        help='Recenter each pattern before averaging (requires recentering enabled, reduces blur)')
     parser.add_argument('--label-guess', action='store_true',
                        help='Include qualitative orientation labels (horizontal/vertical/out-of-plane)')
+    parser.add_argument('--flip-labels', action='store_true',
+                       help='Transpose cluster labels to test scan_y/scan_x alignment (troubleshooting)')
+    parser.add_argument('--scan-shape', nargs=2, type=int, default=None,
+                       help='Manual scan shape (scan_y scan_x) to override automatic inference')
     
     args = parser.parse_args()
     
@@ -1139,7 +1296,20 @@ Examples:
     
     try:
         # Load data
-        data, scan_shape, metadata = load_h5_data(args.h5_file)
+        data, auto_scan_shape, metadata = load_h5_data(args.h5_file)
+        
+        # Use manual scan shape if provided
+        if args.scan_shape:
+            scan_shape = tuple(args.scan_shape)
+            print(f"Using manual scan shape: {scan_shape} (auto-inferred was: {auto_scan_shape})")
+            # Validate that total patterns match
+            expected_patterns = scan_shape[0] * scan_shape[1]
+            if expected_patterns != data.shape[0]:
+                print(f"Error: Manual scan shape {scan_shape} implies {expected_patterns} patterns, but data has {data.shape[0]}")
+                return 1
+        else:
+            scan_shape = auto_scan_shape
+            print(f"Using auto-inferred scan shape: {scan_shape}")
         
         # Load cluster labels
         print(f"Loading cluster labels from {args.cluster_labels}")
@@ -1149,6 +1319,14 @@ Examples:
         if cluster_labels.shape != scan_shape:
             print(f"Reshaping cluster labels from {cluster_labels.shape} to {scan_shape}")
             cluster_labels = cluster_labels.reshape(scan_shape)
+        
+        # Test label alignment with flip option
+        if args.flip_labels:
+            print("TROUBLESHOOTING: Flipping cluster labels (scan_y ↔ scan_x)")
+            print(f"Original label shape: {cluster_labels.shape}")
+            cluster_labels = cluster_labels.T  # Transpose to swap dimensions
+            print(f"Flipped label shape: {cluster_labels.shape}")
+            print("If cluster patterns now look more distinct, there was a scan coordinate mismatch!")
         
         # Create analyzer
         analyzer = ClusterDiffractionAnalyzer(data, scan_shape, cluster_labels)
@@ -1168,6 +1346,9 @@ Examples:
             method=args.method,
             recenter_each=args.recenter_each
         )
+        
+        # Run label alignment diagnostics
+        alignment_diagnostics = analyzer.diagnose_label_alignment()
         
         # Create output directory
         output_path = Path(args.output)
@@ -1201,6 +1382,11 @@ Examples:
         fig3 = analyzer.create_radial_profile_comparison()
         fig3.savefig(output_path / "radial_profiles.png", dpi=300, bbox_inches='tight')
         plt.close(fig3)
+        
+        print("Creating bias-corrected visualization (cluster - scan average)...")
+        fig6 = analyzer.create_bias_corrected_visualization(colormap=args.colormap)
+        fig6.savefig(output_path / "bias_corrected_patterns.png", dpi=300, bbox_inches='tight')
+        plt.close(fig6)
         
         # Save analysis results
         analyzer.save_analysis_results(str(output_path))
